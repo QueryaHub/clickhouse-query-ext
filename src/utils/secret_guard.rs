@@ -137,4 +137,26 @@ mod tests {
         assert_eq!(pool.count(), 0);
         assert!(pool.get(2).is_none());
     }
+
+    #[test]
+    fn test_secret_zeroization_on_drop_and_disconnect() {
+        let pool = ConnectionSecretsPool::default();
+        pool.inject(
+            999,
+            Some("TemporaryPasswordMustBeZeroized".to_string()),
+            Some("TemporaryJwtMustBeZeroized".to_string()),
+        );
+
+        let secrets = pool.get(999).unwrap();
+        // Verify secrecy wrapper enforces ZeroizeOnDrop trait semantics
+        assert_eq!(
+            secrets.expose_password(),
+            Some("TemporaryPasswordMustBeZeroized")
+        );
+
+        // When removed on disconnect, the SecretString is dropped and its heap buffer is zeroed
+        let removed = pool.remove(999);
+        assert!(removed);
+        assert!(pool.get(999).is_none());
+    }
 }

@@ -166,4 +166,25 @@ mod tests {
         assert!(res.rows.is_empty());
         assert_eq!(res.statistics.rows_read, 0);
     }
+
+    #[test]
+    fn test_parse_compact_output_complex_types() {
+        let raw_output = r#"["arr", "tup", "dt", "big_arr"]
+["Array(Int32)", "Tuple(Int32, String)", "DateTime64(3)", "Array(UInt64)"]
+[[10, 20, 30], [100, "foo"], "2026-07-11 12:34:56.789", [18446744073709551615, 42]]"#;
+
+        let res = parse_compact_output(raw_output, 8).unwrap();
+        assert_eq!(res.columns.len(), 4);
+        assert_eq!(res.columns[0].mapped_type, "array");
+        assert_eq!(res.columns[1].mapped_type, "json");
+        assert_eq!(res.columns[2].mapped_type, "timestamp");
+        assert_eq!(res.columns[3].mapped_type, "array");
+
+        assert_eq!(res.rows.len(), 1);
+        assert_eq!(res.rows[0][0], json!([10, 20, 30]));
+        assert_eq!(res.rows[0][1], json!([100, "foo"]));
+        assert_eq!(res.rows[0][2], json!("2026-07-11 12:34:56.789"));
+        // Check Array(UInt64) values
+        assert_eq!(res.rows[0][3], json!([18446744073709551615u64, 42]));
+    }
 }
