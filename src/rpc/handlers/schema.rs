@@ -397,7 +397,7 @@ mod tests {
 
         let res = handle_context_actions(Some(params)).await.unwrap();
         let actions = res["actions"].as_array().unwrap();
-        assert_eq!(actions.len(), 6);
+        assert_eq!(actions.len(), 8);
         assert_eq!(actions[0]["id"], "table.top_100");
 
         ConnectionPool::global().remove(403);

@@ -46,6 +46,35 @@ pub fn get_context_actions_for_node(
     let parts: Vec<&str> = node_id.split('.').collect();
 
     match node_type {
+        "server" | "root_databases" => Ok(vec![
+            SduiContextAction::new(
+                "server.active_mutations",
+                "🔄 All Active Mutations (SYSTEM.mutations)",
+                Some("activity"),
+                "query",
+                Some("SELECT mutation_id, database, table, command, create_time, parts_to_do FROM system.mutations WHERE is_done = 0 ORDER BY create_time ASC".to_string()),
+                false,
+                false,
+            ),
+            SduiContextAction::new(
+                "server.active_queries",
+                "⚡ All Active Queries (SYSTEM.processes)",
+                Some("cpu"),
+                "query",
+                Some("SELECT query_id, user, query, elapsed, formatReadableSize(memory_usage) AS mem FROM system.processes WHERE query NOT LIKE '%system.processes%' ORDER BY elapsed DESC".to_string()),
+                false,
+                false,
+            ),
+            SduiContextAction::new(
+                "server.kill_long_queries",
+                "🛑 Kill Long Running Queries (>60s)",
+                Some("x-circle"),
+                "execute",
+                Some("KILL QUERY WHERE elapsed > 60 AND query NOT LIKE '%KILL QUERY%' ASYNC".to_string()),
+                true,
+                true,
+            ),
+        ]),
         "table" => {
             if parts.len() < 3 {
                 return Err(DriverError::Client(format!(
@@ -119,6 +148,30 @@ pub fn get_context_actions_for_node(
                     )),
                     false,
                     false,
+                ),
+                SduiContextAction::new(
+                    "table.active_queries",
+                    "⚡ Active Queries for Table",
+                    Some("cpu"),
+                    "query",
+                    Some(format!(
+                        "SELECT query_id, user, query, elapsed, formatReadableSize(memory_usage) AS mem FROM system.processes WHERE current_database = '{}' AND query LIKE '%{}%' AND query NOT LIKE '%system.processes%'",
+                        db_name, table_name
+                    )),
+                    false,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "table.kill_mutations",
+                    "🛑 Kill Mutations for Table",
+                    Some("x-circle"),
+                    "execute",
+                    Some(format!(
+                        "KILL MUTATION WHERE database = '{}' AND table = '{}'",
+                        db_name, table_name
+                    )),
+                    true,
+                    true,
                 ),
             ])
         }
@@ -273,6 +326,24 @@ pub fn get_context_actions_for_node(
                     false,
                     false,
                 ),
+                SduiContextAction::new(
+                    "db.kill_mutations",
+                    "🛑 Kill Mutations in Database",
+                    Some("x-circle"),
+                    "execute",
+                    Some(format!("KILL MUTATION WHERE database = '{}'", db_name)),
+                    true,
+                    true,
+                ),
+                SduiContextAction::new(
+                    "db.kill_queries",
+                    "🛑 Kill Queries in Database",
+                    Some("x-circle"),
+                    "execute",
+                    Some(format!("KILL QUERY WHERE current_database = '{}' ASYNC", db_name)),
+                    true,
+                    true,
+                ),
             ])
         }
         "column" => {
@@ -324,7 +395,7 @@ mod tests {
     #[test]
     fn test_table_context_actions() {
         let actions = get_context_actions_for_node("table", "table.analytics.events").unwrap();
-        assert_eq!(actions.len(), 6);
+        assert_eq!(actions.len(), 8);
         assert_eq!(actions[0].id, "table.top_100");
         assert_eq!(
             actions[0].sql.as_deref(),
@@ -338,6 +409,9 @@ mod tests {
             Some("OPTIMIZE TABLE analytics.events FINAL")
         );
         assert!(actions[3].requires_confirmation);
+
+        assert_eq!(actions[6].id, "table.active_queries");
+        assert_eq!(actions[7].id, "table.kill_mutations");
     }
 
     #[test]
@@ -395,13 +469,26 @@ mod tests {
     #[test]
     fn test_database_and_view_actions() {
         let db_actions = get_context_actions_for_node("database", "db.analytics").unwrap();
-        assert_eq!(db_actions.len(), 2);
+        assert_eq!(db_actions.len(), 4);
         assert_eq!(db_actions[0].id, "db.active_mutations");
+        assert_eq!(db_actions[1].id, "db.active_queries");
+        assert_eq!(db_actions[2].id, "db.kill_mutations");
+        assert_eq!(db_actions[3].id, "db.kill_queries");
 
         let view_actions =
             get_context_actions_for_node("view", "view.analytics.mv_summary").unwrap();
         assert_eq!(view_actions.len(), 2);
         assert_eq!(view_actions[0].id, "view.top_100");
+    }
+
+    #[test]
+    fn test_server_and_process_monitoring_actions() {
+        let server_actions = get_context_actions_for_node("server", "server.cluster").unwrap();
+        assert_eq!(server_actions.len(), 3);
+        assert_eq!(server_actions[0].id, "server.active_mutations");
+        assert_eq!(server_actions[1].id, "server.active_queries");
+        assert_eq!(server_actions[2].id, "server.kill_long_queries");
+        assert!(server_actions[2].danger);
     }
 
     #[test]
