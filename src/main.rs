@@ -16,6 +16,10 @@ use tracing::{error, info};
 async fn main() {
     // Initialize stderr logger first. Never log to stdout!
     utils::logger::init_stderr_logger();
+    utils::recovery::init_panic_hook();
+    if let Err(e) = utils::recovery::ensure_scratch_directories() {
+        error!("Failed to initialize scratch directories: {}", e);
+    }
     info!("Starting clickhouse-query-ext Rust process sandbox driver...");
 
     let (tx, mut rx) = mpsc::channel::<String>(128);
