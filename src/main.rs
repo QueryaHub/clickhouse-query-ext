@@ -31,24 +31,59 @@ async fn main() {
         match serde_json::from_str::<RpcRequest>(&line) {
             Ok(req) => {
                 let id = req.id.clone().unwrap_or(serde_json::Value::Null);
-                match rpc::router::dispatch(&req.method, req.params).await {
-                    Ok(result) => {
-                        let resp = RpcResponse::success(id, result);
-                        if let Ok(json_str) = serde_json::to_string(&resp) {
-                            let _ = transport::framing::write_ndjson_stdout(&json_str);
+                let method = req.method.clone();
+                let is_shutdown = method == "system.shutdown";
+
+                // Fast-track system lifecycle methods (handshake, ping, shutdown)
+                // directly on the dispatcher loop for instant < 5ms response latency.
+                if method == "system.ping" || is_shutdown || method == "system.handshake" {
+                    match rpc::router::dispatch(&method, req.params).await {
+                        Ok(result) => {
+                            let resp = RpcResponse::success(id, result);
+                            if let Ok(json_str) = serde_json::to_string(&resp) {
+                                let _ = transport::framing::write_ndjson_stdout(&json_str);
+                            }
+                        }
+                        Err(err) => {
+                            let resp = RpcResponse::error(
+                                id,
+                                err.to_rpc_code(),
+                                err.to_string(),
+                                None,
+                            );
+                            if let Ok(json_str) = serde_json::to_string(&resp) {
+                                let _ = transport::framing::write_ndjson_stdout(&json_str);
+                            }
                         }
                     }
-                    Err(err) => {
-                        let resp = RpcResponse::error(
-                            id,
-                            err.to_rpc_code(),
-                            err.to_string(),
-                            None,
-                        );
-                        if let Ok(json_str) = serde_json::to_string(&resp) {
-                            let _ = transport::framing::write_ndjson_stdout(&json_str);
-                        }
+                    if is_shutdown {
+                        info!("Shutdown response emitted, terminating process with code 0.");
+                        std::process::exit(0);
                     }
+                } else {
+                    // For heavy database queries (db.*) and SDUI operations, spawn onto Tokio worker threads
+                    // so that `system.ping` heartbeat is never blocked by analytical workloads.
+                    tokio::spawn(async move {
+                        match rpc::router::dispatch(&method, req.params).await {
+                            Ok(result) => {
+                                let resp = RpcResponse::success(id, result);
+                                if let Ok(json_str) = serde_json::to_string(&resp) {
+                                    let _ = transport::framing::write_ndjson_stdout(&json_str);
+                                }
+                            }
+                            Err(err) => {
+                                let resp = RpcResponse::error(
+                                    id,
+                                    err.to_rpc_code(),
+                                    err.to_string(),
+                                    None,
+                                );
+                                if let Ok(json_str) = serde_json::to_string(&resp) {
+                                    let _ = transport::framing::write_ndjson_stdout(&json_str);
+                                }
+                            }
+                        }
+                    });
                 }
             }
             Err(e) => {
