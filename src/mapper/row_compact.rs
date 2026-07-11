@@ -75,7 +75,7 @@ pub fn parse_compact_output(
     }
 
     let mut columns = Vec::with_capacity(names.len());
-    for (name, ch_type) in names.into_iter().zip(types.into_iter()) {
+    for (name, ch_type) in names.into_iter().zip(types) {
         columns.push(ColumnSchema::new(name, ch_type));
     }
 
