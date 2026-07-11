@@ -1,0 +1,40 @@
+[package]
+name = "clickhouse-query-ext"
+version = "1.0.0"
+edition = "2024"
+authors = ["Querya Community"]
+description = "High-performance ClickHouse driver for Querya Desktop"
+
+[dependencies]
+# Async runtime & I/O
+tokio = { version = "1", features = ["rt-multi-thread", "io-std", "sync", "macros", "time", "net"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+
+# HTTP & TLS for ClickHouse API
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+url = "2"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["raw_value"] }
+
+# Memory safety & secrets protection
+secrecy = { version = "0.8", features = ["serde"] }
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+
+# Logging to stderr only
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+regex = "1"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 3
+codegen-units = 1
+panic = "abort"

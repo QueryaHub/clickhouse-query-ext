@@ -1,0 +1,53 @@
+{
+  "type": "form",
+  "id": "clickhouse_connection_form",
+  "fields": [
+    {
+      "key": "host",
+      "label": "Хост сервера ClickHouse",
+      "type": "text",
+      "required": true,
+      "defaultValue": "localhost"
+    },
+    {
+      "key": "port",
+      "label": "HTTP Порт",
+      "type": "number",
+      "required": true,
+      "defaultValue": 8123
+    },
+    {
+      "key": "username",
+      "label": "Пользователь",
+      "type": "text",
+      "required": true,
+      "defaultValue": "default"
+    },
+    {
+      "key": "password",
+      "label": "Пароль",
+      "type": "password",
+      "required": false,
+      "helperText": "Секрет будет внедрен через in-memory RPC"
+    },
+    {
+      "key": "sslMode",
+      "label": "Режим SSL/TLS",
+      "type": "select",
+      "required": true,
+      "defaultValue": "prefer",
+      "options": [
+        {"label": "Disable (HTTP)", "value": "disable"},
+        {"label": "Prefer (HTTPS)", "value": "prefer"},
+        {"label": "Require CA", "value": "require"}
+      ]
+    },
+    {
+      "key": "safe_mode",
+      "label": "Аналитический режим (Safe Mode / Read-Only)",
+      "type": "boolean",
+      "defaultValue": true,
+      "helperText": "Блокирует DROP/ALTER и ограничивает время выполнения и память на сервере ClickHouse"
+    }
+  ]
+}
