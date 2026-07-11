@@ -4,9 +4,12 @@ use crate::mapper::row_compact::parse_compact_output;
 use crate::utils::secret_guard::ConnectionSecretsPool;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tracing::info;
 use url::Url;
+
+static JOB_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,6 +25,21 @@ pub struct QueryParams {
 pub struct CancelParams {
     pub connection_id: u64,
     pub query_id: String,
+    #[serde(default = "default_true")]
+    pub sync: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn generate_query_id(connection_id: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = JOB_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("querya-job-{}-{}-{}", connection_id, now, seq)
 }
 
 /// Pre-checks AST/SQL syntax in Safe Mode (`readonly = true`) before network roundtrip.
@@ -86,10 +104,15 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
         trimmed_sql.to_string()
     };
 
+    let actual_query_id = match &query_params.query_id {
+        Some(qid) if !qid.is_empty() => qid.clone(),
+        _ => generate_query_id(query_params.connection_id),
+    };
+
     info!(
-        "Executing SQL on connectionId={} (query_id={:?}, readonly={}): {}...",
+        "Executing SQL on connectionId={} (query_id='{}', readonly={}): {}...",
         query_params.connection_id,
-        query_params.query_id,
+        actual_query_id,
         client.readonly,
         trimmed_sql.lines().next().unwrap_or("")
     );
@@ -106,19 +129,23 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
         } else {
             ""
         };
-        let parsed = parse_compact_output(mock_output, start_time.elapsed().as_millis() as u64)?;
-        return Ok(serde_json::to_value(parsed)?);
+        let mut parsed_val = serde_json::to_value(parse_compact_output(
+            mock_output,
+            start_time.elapsed().as_millis() as u64,
+        )?)?;
+        if let Some(obj) = parsed_val.as_object_mut() {
+            obj.insert("queryId".to_string(), json!(actual_query_id));
+        }
+        return Ok(parsed_val);
     }
 
     // 3. Real ClickHouse HTTP request
     let mut url = Url::parse(&client.base_url)?;
     url.query_pairs_mut()
-        .append_pair("database", &client.database);
+        .append_pair("database", &client.database)
+        .append_pair("query_id", &actual_query_id);
     if client.readonly {
         url.query_pairs_mut().append_pair("readonly", "1");
-    }
-    if let Some(qid) = &query_params.query_id {
-        url.query_pairs_mut().append_pair("query_id", qid);
     }
 
     let mut req = client.http_client.post(url).body(sql_to_run);
@@ -151,10 +178,14 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
     let elapsed = start_time.elapsed().as_millis() as u64;
 
     if is_tabular_query {
-        let parsed = parse_compact_output(&text, elapsed)?;
-        Ok(serde_json::to_value(parsed)?)
+        let mut parsed_val = serde_json::to_value(parse_compact_output(&text, elapsed)?)?;
+        if let Some(obj) = parsed_val.as_object_mut() {
+            obj.insert("queryId".to_string(), json!(actual_query_id));
+        }
+        Ok(parsed_val)
     } else {
         Ok(json!({
+            "queryId": actual_query_id,
             "columns": [],
             "rows": [],
             "statistics": {
@@ -195,14 +226,15 @@ pub async fn handle_cancel(params: Option<Value>) -> Result<Value, DriverError> 
         return Ok(json!({ "ok": true }));
     }
 
+    let sync_kw = if cancel_params.sync { "SYNC" } else { "ASYNC" };
     let mut url = Url::parse(&client.base_url)?;
     url.query_pairs_mut()
         .append_pair("database", &client.database)
         .append_pair(
             "query",
             &format!(
-                "KILL QUERY WHERE query_id = '{}' ASYNC",
-                cancel_params.query_id
+                "KILL QUERY WHERE query_id = '{}' {}",
+                cancel_params.query_id, sync_kw
             ),
         );
 
@@ -292,7 +324,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_cancel() {
+    async fn test_handle_cancel_sync_and_async() {
         let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
         let client = ClickHouseClient::from_params(ConnectParams {
             connection_id: 333,
@@ -302,14 +334,50 @@ mod tests {
         .unwrap();
         ConnectionPool::global().insert(client);
 
+        // SYNC cancel (default)
         let cancel_params = json!({
             "connectionId": 333,
             "queryId": "query-to-cancel-123"
         });
-
         let res = handle_cancel(Some(cancel_params)).await.unwrap();
         assert_eq!(res, json!({ "ok": true }));
 
+        // ASYNC cancel
+        let cancel_params_async = json!({
+            "connectionId": 333,
+            "queryId": "query-to-cancel-456",
+            "sync": false
+        });
+        let res_async = handle_cancel(Some(cancel_params_async)).await.unwrap();
+        assert_eq!(res_async, json!({ "ok": true }));
+
         ConnectionPool::global().remove(333);
+    }
+
+    #[tokio::test]
+    async fn test_handle_query_auto_generates_query_id() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 444,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let query_params = json!({
+            "connectionId": 444,
+            "sql": "SELECT 1"
+        });
+
+        let res = handle_query(Some(query_params)).await.unwrap();
+        let qid = res["queryId"].as_str().expect("queryId must be returned");
+        assert!(
+            qid.starts_with("querya-job-444-"),
+            "queryId must start with querya-job-444-, got {}",
+            qid
+        );
+
+        ConnectionPool::global().remove(444);
     }
 }
