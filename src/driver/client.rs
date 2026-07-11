@@ -113,8 +113,7 @@ impl ClickHouseClient {
     }
 
     fn mark_server_readonly_enforced(&self) {
-        self.server_enforces_readonly
-            .store(true, Ordering::Relaxed);
+        self.server_enforces_readonly.store(true, Ordering::Relaxed);
     }
 
     /// Returns true when ClickHouse rejects `readonly=1` because the session is
@@ -159,7 +158,10 @@ impl ClickHouseClient {
         Ok(resp.text().await?)
     }
 
-    pub async fn execute_with_readonly_retry<F, Fut>(&self, mut run: F) -> Result<String, DriverError>
+    pub async fn execute_with_readonly_retry<F, Fut>(
+        &self,
+        mut run: F,
+    ) -> Result<String, DriverError>
     where
         F: FnMut(bool) -> Fut,
         Fut: Future<Output = Result<String, DriverError>>,
