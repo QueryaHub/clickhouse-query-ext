@@ -1,6 +1,6 @@
+use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock, RwLock};
-use secrecy::{ExposeSecret, SecretString};
 
 /// Secure container for connection credentials (`password` and/or `jwt_token`).
 /// Uses `secrecy::SecretString` which guarantees automatic zeroization (`zeroize`) of heap memory upon drop
@@ -14,8 +14,14 @@ pub struct ConnectionSecrets {
 impl std::fmt::Debug for ConnectionSecrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectionSecrets")
-            .field("password", &self.password.as_ref().map(|_| "[REDACTED BY SECRECY]"))
-            .field("jwt_token", &self.jwt_token.as_ref().map(|_| "[REDACTED BY SECRECY]"))
+            .field(
+                "password",
+                &self.password.as_ref().map(|_| "[REDACTED BY SECRECY]"),
+            )
+            .field(
+                "jwt_token",
+                &self.jwt_token.as_ref().map(|_| "[REDACTED BY SECRECY]"),
+            )
             .finish()
     }
 }
@@ -98,7 +104,10 @@ mod tests {
 
         assert_eq!(pool.count(), 1);
         let secrets = pool.get(101).expect("Secrets should exist for id 101");
-        assert_eq!(secrets.expose_password(), Some("SuperSecretClickHousePass!"));
+        assert_eq!(
+            secrets.expose_password(),
+            Some("SuperSecretClickHousePass!")
+        );
         assert_eq!(secrets.expose_jwt_token(), Some("jwt.token.payload"));
     }
 

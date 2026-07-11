@@ -1,15 +1,16 @@
+#![allow(dead_code)]
 mod config;
-mod error;
-mod transport;
-mod rpc;
 mod driver;
+mod error;
 mod mapper;
+mod rpc;
 mod sdui;
+mod transport;
 mod utils;
 
+use crate::rpc::models::{RpcRequest, RpcResponse};
 use tokio::sync::mpsc;
 use tracing::{error, info};
-use crate::rpc::models::{RpcRequest, RpcResponse};
 
 #[tokio::main]
 async fn main() {
@@ -36,7 +37,11 @@ async fn main() {
 
                 // Fast-track system lifecycle methods (handshake, ping, injectCredentials, shutdown)
                 // directly on the dispatcher loop for instant < 5ms response latency.
-                if method == "system.ping" || is_shutdown || method == "system.handshake" || method == "system.injectCredentials" {
+                if method == "system.ping"
+                    || is_shutdown
+                    || method == "system.handshake"
+                    || method == "system.injectCredentials"
+                {
                     match rpc::router::dispatch(&method, req.params).await {
                         Ok(result) => {
                             let resp = RpcResponse::success(id, result);
@@ -45,12 +50,8 @@ async fn main() {
                             }
                         }
                         Err(err) => {
-                            let resp = RpcResponse::error(
-                                id,
-                                err.to_rpc_code(),
-                                err.to_string(),
-                                None,
-                            );
+                            let resp =
+                                RpcResponse::error(id, err.to_rpc_code(), err.to_string(), None);
                             if let Ok(json_str) = serde_json::to_string(&resp) {
                                 let _ = transport::framing::write_ndjson_stdout(&json_str);
                             }

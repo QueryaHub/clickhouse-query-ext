@@ -1,5 +1,5 @@
-use serde_json::{json, Value};
 use crate::error::DriverError;
+use serde_json::{Value, json};
 
 pub async fn handle_query(_params: Option<Value>) -> Result<Value, DriverError> {
     Ok(json!({

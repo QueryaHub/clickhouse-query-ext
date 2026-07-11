@@ -24,6 +24,12 @@ pub enum DriverError {
 
     #[error("Safe Mode security violation: {0}")]
     SafeModeViolation(String),
+
+    #[error("HTTP request error: {0}")]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error("URL parsing error: {0}")]
+    Url(#[from] url::ParseError),
 }
 
 impl DriverError {
@@ -35,6 +41,8 @@ impl DriverError {
             DriverError::Client(_) => -32603,
             DriverError::ConnectionNotFound(_) => -32002,
             DriverError::SafeModeViolation(_) => -32603,
+            DriverError::Reqwest(_) => -32603,
+            DriverError::Url(_) => -32602,
         }
     }
 }

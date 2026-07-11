@@ -43,7 +43,11 @@ impl RpcResponse {
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(RpcErrorObject { code, message, data }),
+            error: Some(RpcErrorObject {
+                code,
+                message,
+                data,
+            }),
         }
     }
 }
