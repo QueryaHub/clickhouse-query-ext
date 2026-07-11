@@ -2,12 +2,21 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::info;
 use crate::error::DriverError;
+use crate::utils::secret_guard::ConnectionSecretsPool;
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct HandshakeParams {
     pub querya_version: Option<String>,
     pub plugin_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InjectCredentialsParams {
+    pub connection_id: u64,
+    pub password: Option<String>,
+    pub jwt_token: Option<String>,
 }
 
 /// Handler for `system.handshake`.
@@ -50,10 +59,36 @@ pub async fn handle_ping(_params: Option<Value>) -> Result<Value, DriverError> {
     Ok(json!("pong"))
 }
 
+/// Handler for `system.injectCredentials`.
+/// Securely stores password and/or JWT token into `ConnectionSecretsPool` (`SecretString`).
+pub async fn handle_inject_credentials(params: Option<Value>) -> Result<Value, DriverError> {
+    let params_val = params.ok_or_else(|| DriverError::Rpc {
+        code: -32602,
+        message: "Invalid params: system.injectCredentials requires connectionId and credentials".to_string(),
+        data: None,
+    })?;
+
+    let p: InjectCredentialsParams = serde_json::from_value(params_val).map_err(|e| DriverError::Rpc {
+        code: -32602,
+        message: format!("Invalid injectCredentials params structure: {}", e),
+        data: None,
+    })?;
+
+    ConnectionSecretsPool::global().inject(
+        p.connection_id,
+        p.password,
+        p.jwt_token,
+    );
+
+    info!("Credentials securely injected into zero-trust pool for connectionId={}", p.connection_id);
+    Ok(json!({ "ok": true }))
+}
+
 /// Handler for `system.shutdown`.
-/// Graceful teardown signal from Querya Host.
+/// Graceful teardown signal from Querya Host: clears all memory secrets and zeroizes RAM.
 pub async fn handle_shutdown(_params: Option<Value>) -> Result<Value, DriverError> {
-    info!("system.shutdown requested by host.");
+    info!("system.shutdown requested by host. Wiping all in-memory connection secrets...");
+    ConnectionSecretsPool::global().clear_all();
     Ok(json!({ "ok": true }))
 }
 
@@ -85,8 +120,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_shutdown() {
+    async fn test_handle_inject_credentials() {
+        let params = json!({
+            "connectionId": 999,
+            "password": "ClickHouseSecurePassword999",
+            "jwtToken": null
+        });
+        let res = handle_inject_credentials(Some(params)).await.unwrap();
+        assert_eq!(res, json!({ "ok": true }));
+
+        let secrets = ConnectionSecretsPool::global().get(999).expect("Should find secrets for id 999");
+        assert_eq!(secrets.expose_password(), Some("ClickHouseSecurePassword999"));
+        assert_eq!(secrets.expose_jwt_token(), None);
+
+        // Clean up after test
+        ConnectionSecretsPool::global().remove(999);
+    }
+
+    #[tokio::test]
+    async fn test_handle_shutdown_wipes_pool() {
+        ConnectionSecretsPool::global().inject(888, Some("pass".to_string()), None);
+        assert!(ConnectionSecretsPool::global().get(888).is_some());
+
         let res = handle_shutdown(None).await.unwrap();
         assert_eq!(res, json!({ "ok": true }));
+        assert!(ConnectionSecretsPool::global().get(888).is_none());
     }
 }

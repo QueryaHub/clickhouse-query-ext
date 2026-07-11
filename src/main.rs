@@ -34,9 +34,9 @@ async fn main() {
                 let method = req.method.clone();
                 let is_shutdown = method == "system.shutdown";
 
-                // Fast-track system lifecycle methods (handshake, ping, shutdown)
+                // Fast-track system lifecycle methods (handshake, ping, injectCredentials, shutdown)
                 // directly on the dispatcher loop for instant < 5ms response latency.
-                if method == "system.ping" || is_shutdown || method == "system.handshake" {
+                if method == "system.ping" || is_shutdown || method == "system.handshake" || method == "system.injectCredentials" {
                     match rpc::router::dispatch(&method, req.params).await {
                         Ok(result) => {
                             let resp = RpcResponse::success(id, result);
