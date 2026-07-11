@@ -20,6 +20,14 @@ pub struct ExpandTreeNodeParams {
     pub node_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextActionsParams {
+    pub connection_id: u64,
+    pub node_type: String,
+    pub node_id: String,
+}
+
 /// Helper to execute an internal introspection query against ClickHouse using HTTP client and credentials pool.
 async fn run_introspection_query(connection_id: u64, sql: &str) -> Result<String, DriverError> {
     let client = ConnectionPool::global()
@@ -243,6 +251,44 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
     )))
 }
 
+/// Handler for `db.getConnectionFormSchema`. Returns SDUI form schema (`connection_form.json`).
+pub async fn handle_get_connection_form_schema(
+    _params: Option<Value>,
+) -> Result<Value, DriverError> {
+    info!("Serving SDUI connection form schema");
+    Ok(crate::sdui::form::get_connection_form_schema())
+}
+
+/// Handler for `sdui.contextActions`. Returns context menu actions (`table`, `partition`, `database`, `view`).
+pub async fn handle_context_actions(params: Option<Value>) -> Result<Value, DriverError> {
+    let params_val = params.ok_or_else(|| DriverError::Rpc {
+        code: -32602,
+        message: "Invalid params: sdui.contextActions requires connectionId, nodeType and nodeId"
+            .to_string(),
+        data: None,
+    })?;
+
+    let p: ContextActionsParams =
+        serde_json::from_value(params_val).map_err(|e| DriverError::Rpc {
+            code: -32602,
+            message: format!("Malformed sdui.contextActions parameters: {}", e),
+            data: None,
+        })?;
+
+    // Verify connection exists in pool
+    let _client = ConnectionPool::global()
+        .get(p.connection_id)
+        .ok_or_else(|| DriverError::ConnectionNotFound(p.connection_id))?;
+
+    info!(
+        "Generating context actions for connectionId={}, nodeType='{}', nodeId='{}'",
+        p.connection_id, p.node_type, p.node_id
+    );
+
+    let actions = crate::sdui::actions::get_context_actions_for_node(&p.node_type, &p.node_id)?;
+    Ok(json!({ "actions": actions }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +368,38 @@ mod tests {
         assert_eq!(res_parts["nodes"][0]["label"], "⚡ 202607");
 
         ConnectionPool::global().remove(402);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_connection_form_schema() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let res = handle_get_connection_form_schema(None).await.unwrap();
+        assert_eq!(res["type"], "form");
+        assert_eq!(res["id"], "clickhouse_connection_form");
+    }
+
+    #[tokio::test]
+    async fn test_handle_context_actions() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 403,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let params = json!({
+            "connectionId": 403,
+            "nodeType": "table",
+            "nodeId": "table.analytics.events"
+        });
+
+        let res = handle_context_actions(Some(params)).await.unwrap();
+        let actions = res["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 6);
+        assert_eq!(actions[0]["id"], "table.top_100");
+
+        ConnectionPool::global().remove(403);
     }
 }
