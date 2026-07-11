@@ -226,6 +226,24 @@ fn build_non_tabular_result(
                 elapsed
             )
         }
+    } else if operation == "alter" && upper_sql.contains("PARTITION") {
+        if upper_sql.contains("FREEZE PARTITION") {
+            format!(
+                "Partition frozen successfully in {}ms (backup created in /shadow/)",
+                elapsed
+            )
+        } else if upper_sql.contains("DROP PARTITION") {
+            format!("Partition dropped successfully in {}ms", elapsed)
+        } else if upper_sql.contains("DETACH PARTITION") {
+            format!("Partition detached successfully in {}ms", elapsed)
+        } else if upper_sql.contains("ATTACH PARTITION") {
+            format!("Partition attached successfully in {}ms", elapsed)
+        } else {
+            format!(
+                "Partition operation completed successfully in {}ms",
+                elapsed
+            )
+        }
     } else {
         format!("Command completed successfully in {}ms", elapsed)
     };
@@ -471,5 +489,78 @@ mod tests {
         );
 
         ConnectionPool::global().remove(555);
+    }
+
+    #[tokio::test]
+    async fn test_handle_query_partition_lifecycle() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 666,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            readonly: Some(false),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        // FREEZE PARTITION
+        let freeze_res = handle_query(Some(json!({
+            "connectionId": 666,
+            "sql": "ALTER TABLE analytics.events FREEZE PARTITION '202607'"
+        })))
+        .await
+        .unwrap();
+        assert_eq!(freeze_res["operation"], "alter");
+        assert!(
+            freeze_res["message"]
+                .as_str()
+                .unwrap()
+                .contains("Partition frozen successfully")
+        );
+        assert!(freeze_res["message"].as_str().unwrap().contains("/shadow/"));
+
+        // DROP PARTITION
+        let drop_res = handle_query(Some(json!({
+            "connectionId": 666,
+            "sql": "ALTER TABLE analytics.events DROP PARTITION '202607'"
+        })))
+        .await
+        .unwrap();
+        assert!(
+            drop_res["message"]
+                .as_str()
+                .unwrap()
+                .contains("Partition dropped successfully")
+        );
+
+        // DETACH PARTITION
+        let detach_res = handle_query(Some(json!({
+            "connectionId": 666,
+            "sql": "ALTER TABLE analytics.events DETACH PARTITION '202607'"
+        })))
+        .await
+        .unwrap();
+        assert!(
+            detach_res["message"]
+                .as_str()
+                .unwrap()
+                .contains("Partition detached successfully")
+        );
+
+        // ATTACH PARTITION
+        let attach_res = handle_query(Some(json!({
+            "connectionId": 666,
+            "sql": "ALTER TABLE analytics.events ATTACH PARTITION '202607'"
+        })))
+        .await
+        .unwrap();
+        assert!(
+            attach_res["message"]
+                .as_str()
+                .unwrap()
+                .contains("Partition attached successfully")
+        );
+
+        ConnectionPool::global().remove(666);
     }
 }

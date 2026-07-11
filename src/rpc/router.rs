@@ -57,7 +57,7 @@ mod tests {
 
         let res = dispatch("sdui.contextActions", Some(params)).await.unwrap();
         let actions = res["actions"].as_array().unwrap();
-        assert_eq!(actions.len(), 5);
+        assert_eq!(actions.len(), 6);
         assert_eq!(actions[0]["id"], "partition.drop");
 
         ConnectionPool::global().remove(888);
