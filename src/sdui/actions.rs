@@ -201,6 +201,30 @@ pub fn get_context_actions_for_node(
                     true,
                     true,
                 ),
+                SduiContextAction::new(
+                    "partition.optimize_final",
+                    format!("🔨 Optimize Partition '{}' (FINAL)", partition),
+                    Some("tool"),
+                    "execute",
+                    Some(format!(
+                        "OPTIMIZE TABLE {}.{} PARTITION '{}' FINAL",
+                        db_name, table_name, partition
+                    )),
+                    true,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "partition.deduplicate",
+                    format!("🧹 Deduplicate Partition '{}' (DEDUPLICATE)", partition),
+                    Some("filter"),
+                    "execute",
+                    Some(format!(
+                        "OPTIMIZE TABLE {}.{} PARTITION '{}' DEDUPLICATE",
+                        db_name, table_name, partition
+                    )),
+                    true,
+                    false,
+                ),
             ])
         }
         "database" => {
@@ -308,7 +332,7 @@ mod tests {
     fn test_partition_context_actions() {
         let actions =
             get_context_actions_for_node("partition", "part.analytics.events.202607").unwrap();
-        assert_eq!(actions.len(), 3);
+        assert_eq!(actions.len(), 5);
         assert_eq!(actions[0].id, "partition.drop");
         assert_eq!(
             actions[0].sql.as_deref(),
@@ -324,6 +348,20 @@ mod tests {
         );
         assert!(!actions[1].requires_confirmation);
         assert!(!actions[1].danger);
+
+        assert_eq!(actions[3].id, "partition.optimize_final");
+        assert_eq!(
+            actions[3].sql.as_deref(),
+            Some("OPTIMIZE TABLE analytics.events PARTITION '202607' FINAL")
+        );
+        assert!(actions[3].requires_confirmation);
+
+        assert_eq!(actions[4].id, "partition.deduplicate");
+        assert_eq!(
+            actions[4].sql.as_deref(),
+            Some("OPTIMIZE TABLE analytics.events PARTITION '202607' DEDUPLICATE")
+        );
+        assert!(actions[4].requires_confirmation);
     }
 
     #[test]
