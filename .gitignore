@@ -1,0 +1,6 @@
+/target/
+*.qext
+.DS_Store
+*.log
+/scratch/
+.env
