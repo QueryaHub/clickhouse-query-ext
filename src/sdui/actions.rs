@@ -1,0 +1,308 @@
+use crate::error::DriverError;
+use serde::Serialize;
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SduiContextAction {
+    pub id: String,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub action_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql: Option<String>,
+    pub requires_confirmation: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub danger: bool,
+}
+
+impl SduiContextAction {
+    pub fn new(
+        id: impl Into<String>,
+        label: impl Into<String>,
+        icon: Option<&str>,
+        action_type: impl Into<String>,
+        sql: Option<String>,
+        requires_confirmation: bool,
+        danger: bool,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            icon: icon.map(|s| s.to_string()),
+            action_type: action_type.into(),
+            sql,
+            requires_confirmation,
+            danger,
+        }
+    }
+}
+
+/// Generates SDUI context menu actions based on `nodeType` and `nodeId`.
+pub fn get_context_actions_for_node(
+    node_type: &str,
+    node_id: &str,
+) -> Result<Vec<SduiContextAction>, DriverError> {
+    let parts: Vec<&str> = node_id.split('.').collect();
+
+    match node_type {
+        "table" => {
+            if parts.len() < 3 {
+                return Err(DriverError::Client(format!(
+                    "Invalid nodeId for table context actions: '{}'",
+                    node_id
+                )));
+            }
+            let db_name = parts[1];
+            let table_name = parts[2];
+
+            Ok(vec![
+                SduiContextAction::new(
+                    "table.top_100",
+                    "⚡ Top 100 Rows",
+                    Some("table"),
+                    "query",
+                    Some(format!(
+                        "SELECT * FROM {}.{} LIMIT 100",
+                        db_name, table_name
+                    )),
+                    false,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "table.show_ddl",
+                    "📜 Show DDL (SHOW CREATE TABLE)",
+                    Some("code"),
+                    "query",
+                    Some(format!("SHOW CREATE TABLE {}.{}", db_name, table_name)),
+                    false,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "table.col_stats",
+                    "📈 Column Statistics (Быстрый профайлер)",
+                    Some("bar-chart"),
+                    "modal",
+                    None,
+                    false,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "table.optimize_final",
+                    "🔨 Optimize Table (FINAL)",
+                    Some("tool"),
+                    "execute",
+                    Some(format!("OPTIMIZE TABLE {}.{} FINAL", db_name, table_name)),
+                    true,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "table.deduplicate",
+                    "🧹 Deduplicate (DEDUPLICATE)",
+                    Some("filter"),
+                    "execute",
+                    Some(format!(
+                        "OPTIMIZE TABLE {}.{} DEDUPLICATE",
+                        db_name, table_name
+                    )),
+                    true,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "table.active_mutations",
+                    "🔄 Active Mutations for Table",
+                    Some("activity"),
+                    "query",
+                    Some(format!(
+                        "SELECT mutation_id, command, create_time, parts_to_do, is_done FROM system.mutations WHERE database = '{}' AND table = '{}' AND is_done = 0",
+                        db_name, table_name
+                    )),
+                    false,
+                    false,
+                ),
+            ])
+        }
+        "view" => {
+            if parts.len() < 3 {
+                return Err(DriverError::Client(format!(
+                    "Invalid nodeId for view context actions: '{}'",
+                    node_id
+                )));
+            }
+            let db_name = parts[1];
+            let view_name = parts[2];
+
+            Ok(vec![
+                SduiContextAction::new(
+                    "view.top_100",
+                    "⚡ Top 100 Rows",
+                    Some("eye"),
+                    "query",
+                    Some(format!("SELECT * FROM {}.{} LIMIT 100", db_name, view_name)),
+                    false,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "view.show_ddl",
+                    "📜 Show DDL (SHOW CREATE TABLE)",
+                    Some("code"),
+                    "query",
+                    Some(format!("SHOW CREATE TABLE {}.{}", db_name, view_name)),
+                    false,
+                    false,
+                ),
+            ])
+        }
+        "partition" => {
+            if parts.len() < 4 {
+                return Err(DriverError::Client(format!(
+                    "Invalid nodeId for partition context actions: '{}'",
+                    node_id
+                )));
+            }
+            let db_name = parts[1];
+            let table_name = parts[2];
+            let partition = parts[3];
+
+            Ok(vec![
+                SduiContextAction::new(
+                    "partition.drop",
+                    format!("🗑️ Drop Partition '{}'", partition),
+                    Some("trash-2"),
+                    "execute",
+                    Some(format!(
+                        "ALTER TABLE {}.{} DROP PARTITION '{}'",
+                        db_name, table_name, partition
+                    )),
+                    true,
+                    true,
+                ),
+                SduiContextAction::new(
+                    "partition.freeze",
+                    format!("❄️ Freeze Partition '{}' (Backup)", partition),
+                    Some("save"),
+                    "execute",
+                    Some(format!(
+                        "ALTER TABLE {}.{} FREEZE PARTITION '{}'",
+                        db_name, table_name, partition
+                    )),
+                    false,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "partition.detach",
+                    format!("🔌 Detach Partition '{}'", partition),
+                    Some("log-out"),
+                    "execute",
+                    Some(format!(
+                        "ALTER TABLE {}.{} DETACH PARTITION '{}'",
+                        db_name, table_name, partition
+                    )),
+                    true,
+                    true,
+                ),
+            ])
+        }
+        "database" => {
+            if parts.len() < 2 {
+                return Err(DriverError::Client(format!(
+                    "Invalid nodeId for database context actions: '{}'",
+                    node_id
+                )));
+            }
+            let db_name = parts[1];
+
+            Ok(vec![
+                SduiContextAction::new(
+                    "db.active_mutations",
+                    "🔄 Active Mutations in Database",
+                    Some("activity"),
+                    "query",
+                    Some(format!(
+                        "SELECT mutation_id, table, command, create_time, parts_to_do FROM system.mutations WHERE database = '{}' AND is_done = 0",
+                        db_name
+                    )),
+                    false,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "db.active_queries",
+                    "⚡ Active Queries in Database",
+                    Some("cpu"),
+                    "query",
+                    Some(format!(
+                        "SELECT query_id, user, query, elapsed, formatReadableSize(memory_usage) AS mem FROM system.processes WHERE current_database = '{}'",
+                        db_name
+                    )),
+                    false,
+                    false,
+                ),
+            ])
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_table_context_actions() {
+        let actions = get_context_actions_for_node("table", "table.analytics.events").unwrap();
+        assert_eq!(actions.len(), 6);
+        assert_eq!(actions[0].id, "table.top_100");
+        assert_eq!(
+            actions[0].sql.as_deref(),
+            Some("SELECT * FROM analytics.events LIMIT 100")
+        );
+        assert!(!actions[0].requires_confirmation);
+
+        assert_eq!(actions[3].id, "table.optimize_final");
+        assert_eq!(
+            actions[3].sql.as_deref(),
+            Some("OPTIMIZE TABLE analytics.events FINAL")
+        );
+        assert!(actions[3].requires_confirmation);
+    }
+
+    #[test]
+    fn test_partition_context_actions() {
+        let actions =
+            get_context_actions_for_node("partition", "part.analytics.events.202607").unwrap();
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].id, "partition.drop");
+        assert_eq!(
+            actions[0].sql.as_deref(),
+            Some("ALTER TABLE analytics.events DROP PARTITION '202607'")
+        );
+        assert!(actions[0].requires_confirmation);
+        assert!(actions[0].danger);
+
+        assert_eq!(actions[1].id, "partition.freeze");
+        assert_eq!(
+            actions[1].sql.as_deref(),
+            Some("ALTER TABLE analytics.events FREEZE PARTITION '202607'")
+        );
+        assert!(!actions[1].requires_confirmation);
+        assert!(!actions[1].danger);
+    }
+
+    #[test]
+    fn test_database_and_view_actions() {
+        let db_actions = get_context_actions_for_node("database", "db.analytics").unwrap();
+        assert_eq!(db_actions.len(), 2);
+        assert_eq!(db_actions[0].id, "db.active_mutations");
+
+        let view_actions =
+            get_context_actions_for_node("view", "view.analytics.mv_summary").unwrap();
+        assert_eq!(view_actions.len(), 2);
+        assert_eq!(view_actions[0].id, "view.top_100");
+    }
+
+    #[test]
+    fn test_invalid_node_id() {
+        assert!(get_context_actions_for_node("table", "table.only").is_err());
+        assert!(get_context_actions_for_node("partition", "part.only.two").is_err());
+    }
+}
