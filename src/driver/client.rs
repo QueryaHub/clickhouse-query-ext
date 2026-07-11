@@ -14,6 +14,7 @@ pub struct ConnectParams {
     pub port: Option<u16>,
     pub user: Option<String>,
     pub database: Option<String>,
+    #[serde(alias = "safe_mode", alias = "safeMode")]
     pub readonly: Option<bool>,
 }
 
@@ -97,7 +98,10 @@ impl ClickHouseClient {
             .append_pair("query", "SELECT version()")
             .append_pair("database", &self.database);
         if self.readonly {
-            url.query_pairs_mut().append_pair("readonly", "1");
+            url.query_pairs_mut()
+                .append_pair("readonly", "1")
+                .append_pair("max_execution_time", "300")
+                .append_pair("max_memory_usage", "10000000000");
         }
 
         let mut req = self.http_client.get(url);
@@ -161,5 +165,27 @@ mod tests {
         let client = ClickHouseClient::from_params(params).unwrap();
         let ver = client.ping_connection().await.unwrap();
         assert_eq!(ver, "mock-clickhouse-23.8.1.1");
+    }
+
+    #[test]
+    fn test_from_params_safe_mode_aliases() {
+        // Test parsing safe_mode alias via serde
+        let json_val = serde_json::json!({
+            "connectionId": 10,
+            "host": "localhost",
+            "safe_mode": true
+        });
+        let params: ConnectParams = serde_json::from_value(json_val).unwrap();
+        let client = ClickHouseClient::from_params(params).unwrap();
+        assert!(client.readonly);
+
+        let json_val_off = serde_json::json!({
+            "connectionId": 11,
+            "host": "localhost",
+            "safeMode": false
+        });
+        let params_off: ConnectParams = serde_json::from_value(json_val_off).unwrap();
+        let client_off = ClickHouseClient::from_params(params_off).unwrap();
+        assert!(!client_off.readonly);
     }
 }

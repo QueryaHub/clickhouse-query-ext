@@ -51,19 +51,96 @@ fn generate_query_id(connection_id: u64) -> String {
     format!("querya-job-{}-{}-{}", connection_id, now, seq)
 }
 
+fn strip_sql_comments_and_trim(sql: &str) -> String {
+    let mut res = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut in_single_comment = false;
+    let mut in_multi_comment = false;
+    let mut in_string = false;
+    let mut string_quote = ' ';
+
+    while let Some(c) = chars.next() {
+        if in_single_comment {
+            if c == '\n' {
+                in_single_comment = false;
+                res.push(' ');
+            }
+        } else if in_multi_comment {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_multi_comment = false;
+                res.push(' ');
+            }
+        } else if in_string {
+            res.push(c);
+            if c == string_quote {
+                in_string = false;
+            }
+        } else if c == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            in_single_comment = true;
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            in_multi_comment = true;
+        } else if c == '\'' || c == '`' || c == '"' {
+            in_string = true;
+            string_quote = c;
+            res.push(c);
+        } else {
+            res.push(c);
+        }
+    }
+    res.trim().to_uppercase()
+}
+
 /// Pre-checks AST/SQL syntax in Safe Mode (`readonly = true`) before network roundtrip.
 fn enforce_safe_mode_precheck(sql: &str) -> Result<(), DriverError> {
-    let upper = sql.trim().to_uppercase();
-    if upper.contains("DROP DATABASE")
-        || upper.contains("TRUNCATE TABLE")
-        || upper.contains("DROP TABLE")
-        || (upper.contains("ALTER TABLE") && upper.contains("DROP"))
-        || upper.starts_with("INSERT INTO")
-        || upper.starts_with("DELETE FROM")
-        || upper.starts_with("UPDATE ")
-        || upper.starts_with("CREATE DATABASE")
-        || upper.starts_with("CREATE TABLE")
-    {
+    let upper = strip_sql_comments_and_trim(sql);
+    let tokens: Vec<&str> = upper.split_whitespace().collect();
+    if tokens.is_empty() {
+        return Ok(());
+    }
+
+    let first = tokens[0];
+    let second = tokens.get(1).copied().unwrap_or("");
+    let third = tokens.get(2).copied().unwrap_or("");
+
+    let is_dangerous = match first {
+        "DROP" => {
+            second == "DATABASE" || second == "TABLE" || second == "VIEW" || second == "DICTIONARY"
+        }
+        "TRUNCATE" => second == "TABLE",
+        "ALTER" => {
+            second == "TABLE"
+                && tokens.iter().any(|&t| {
+                    t == "DROP"
+                        || t == "DELETE"
+                        || t == "UPDATE"
+                        || t == "MODIFY"
+                        || t == "REPLACE"
+                        || t == "CLEAR"
+                        || t == "FREEZE"
+                        || t == "ATTACH"
+                        || t == "DETACH"
+                })
+        }
+        "INSERT" => second == "INTO" || third == "INTO",
+        "DELETE" => second == "FROM" || third == "FROM",
+        "UPDATE" => true,
+        "CREATE" => {
+            second == "DATABASE" || second == "TABLE" || second == "VIEW" || second == "DICTIONARY"
+        }
+        "RENAME" => second == "TABLE" || second == "DATABASE",
+        "ATTACH" | "DETACH" => second == "TABLE" || second == "PARTITION",
+        _ => {
+            upper.contains("DROP DATABASE")
+                || upper.contains("TRUNCATE TABLE")
+                || upper.contains("DROP TABLE")
+                || (upper.contains("ALTER TABLE") && upper.contains("DROP"))
+        }
+    };
+
+    if is_dangerous {
         return Err(DriverError::SafeModeViolation(
             "Operation blocked by Safe Mode: write or destructive queries are forbidden in analytical read-only mode".to_string(),
         ));
@@ -159,7 +236,10 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
         .append_pair("database", &client.database)
         .append_pair("query_id", &actual_query_id);
     if client.readonly {
-        url.query_pairs_mut().append_pair("readonly", "1");
+        url.query_pairs_mut()
+            .append_pair("readonly", "1")
+            .append_pair("max_execution_time", "300")
+            .append_pair("max_memory_usage", "10000000000");
     }
 
     let mut req = client.http_client.post(url).body(sql_to_run);
@@ -417,9 +497,32 @@ mod tests {
     fn test_safe_mode_precheck_rejections() {
         assert!(enforce_safe_mode_precheck("SELECT * FROM events").is_ok());
         assert!(enforce_safe_mode_precheck("SHOW TABLES").is_ok());
+        assert!(enforce_safe_mode_precheck("DESCRIBE TABLE events").is_ok());
+        assert!(
+            enforce_safe_mode_precheck("-- analytical query\nSELECT count() FROM logs").is_ok()
+        );
+
+        let drop_db = enforce_safe_mode_precheck("DROP DATABASE prod").unwrap_err();
+        assert_eq!(drop_db.to_rpc_code(), -32603);
+        assert!(
+            drop_db
+                .to_string()
+                .contains("Operation blocked by Safe Mode")
+        );
+
         assert!(enforce_safe_mode_precheck("DROP TABLE events").is_err());
         assert!(enforce_safe_mode_precheck("TRUNCATE TABLE logs").is_err());
         assert!(enforce_safe_mode_precheck("ALTER TABLE events DROP COLUMN age").is_err());
+        assert!(
+            enforce_safe_mode_precheck(
+                "/* multiline\n comment */\nALTER TABLE events DROP COLUMN age"
+            )
+            .is_err()
+        );
+        assert!(enforce_safe_mode_precheck("-- comment\nDROP TABLE logs").is_err());
+        assert!(enforce_safe_mode_precheck("INSERT INTO events VALUES (1, 'test')").is_err());
+        assert!(enforce_safe_mode_precheck("DELETE FROM events WHERE id = 1").is_err());
+        assert!(enforce_safe_mode_precheck("CREATE TABLE new_tbl (id Int32)").is_err());
     }
 
     #[tokio::test]
