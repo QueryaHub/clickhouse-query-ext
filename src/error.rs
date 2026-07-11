@@ -22,7 +22,7 @@ pub enum DriverError {
     #[error("Connection not found: #{0}")]
     ConnectionNotFound(u64),
 
-    #[error("Safe Mode security violation: {0}")]
+    #[error("{0}")]
     SafeModeViolation(String),
 
     #[error("HTTP request error: {0}")]

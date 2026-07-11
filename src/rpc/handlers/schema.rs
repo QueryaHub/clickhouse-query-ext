@@ -41,6 +41,12 @@ async fn run_introspection_query(connection_id: u64, sql: &str) -> Result<String
     let mut url = Url::parse(&client.base_url)?;
     url.query_pairs_mut()
         .append_pair("database", &client.database);
+    if client.readonly {
+        url.query_pairs_mut()
+            .append_pair("readonly", "1")
+            .append_pair("max_execution_time", "300")
+            .append_pair("max_memory_usage", "10000000000");
+    }
 
     let mut req = client.http_client.post(url).body(sql.to_string());
     if let Some(secrets) = ConnectionSecretsPool::global().get(client.connection_id) {
