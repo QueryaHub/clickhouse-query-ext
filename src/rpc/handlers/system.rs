@@ -1,8 +1,8 @@
-use serde::Deserialize;
-use serde_json::{json, Value};
-use tracing::info;
 use crate::error::DriverError;
 use crate::utils::secret_guard::ConnectionSecretsPool;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tracing::info;
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -64,31 +64,35 @@ pub async fn handle_ping(_params: Option<Value>) -> Result<Value, DriverError> {
 pub async fn handle_inject_credentials(params: Option<Value>) -> Result<Value, DriverError> {
     let params_val = params.ok_or_else(|| DriverError::Rpc {
         code: -32602,
-        message: "Invalid params: system.injectCredentials requires connectionId and credentials".to_string(),
+        message: "Invalid params: system.injectCredentials requires connectionId and credentials"
+            .to_string(),
         data: None,
     })?;
 
-    let p: InjectCredentialsParams = serde_json::from_value(params_val).map_err(|e| DriverError::Rpc {
-        code: -32602,
-        message: format!("Invalid injectCredentials params structure: {}", e),
-        data: None,
-    })?;
+    let p: InjectCredentialsParams =
+        serde_json::from_value(params_val).map_err(|e| DriverError::Rpc {
+            code: -32602,
+            message: format!("Invalid injectCredentials params structure: {}", e),
+            data: None,
+        })?;
 
-    ConnectionSecretsPool::global().inject(
-        p.connection_id,
-        p.password,
-        p.jwt_token,
+    ConnectionSecretsPool::global().inject(p.connection_id, p.password, p.jwt_token);
+
+    info!(
+        "Credentials securely injected into zero-trust pool for connectionId={}",
+        p.connection_id
     );
-
-    info!("Credentials securely injected into zero-trust pool for connectionId={}", p.connection_id);
     Ok(json!({ "ok": true }))
 }
 
 /// Handler for `system.shutdown`.
 /// Graceful teardown signal from Querya Host: clears all memory secrets and zeroizes RAM.
 pub async fn handle_shutdown(_params: Option<Value>) -> Result<Value, DriverError> {
-    info!("system.shutdown requested by host. Wiping all in-memory connection secrets...");
+    info!(
+        "system.shutdown requested by host. Wiping all in-memory connection secrets and active pools..."
+    );
     ConnectionSecretsPool::global().clear_all();
+    crate::driver::pool::ConnectionPool::global().clear_all();
     Ok(json!({ "ok": true }))
 }
 
@@ -129,8 +133,13 @@ mod tests {
         let res = handle_inject_credentials(Some(params)).await.unwrap();
         assert_eq!(res, json!({ "ok": true }));
 
-        let secrets = ConnectionSecretsPool::global().get(999).expect("Should find secrets for id 999");
-        assert_eq!(secrets.expose_password(), Some("ClickHouseSecurePassword999"));
+        let secrets = ConnectionSecretsPool::global()
+            .get(999)
+            .expect("Should find secrets for id 999");
+        assert_eq!(
+            secrets.expose_password(),
+            Some("ClickHouseSecurePassword999")
+        );
         assert_eq!(secrets.expose_jwt_token(), None);
 
         // Clean up after test

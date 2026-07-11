@@ -1,7 +1,11 @@
+use regex::Regex;
 use std::io::{self, Write};
 use std::sync::OnceLock;
-use regex::Regex;
-use tracing_subscriber::{fmt::{self, MakeWriter}, prelude::*, EnvFilter};
+use tracing_subscriber::{
+    EnvFilter,
+    fmt::{self, MakeWriter},
+    prelude::*,
+};
 
 /// Returns the compiled list of sanitization regex patterns.
 fn sanitization_patterns() -> &'static [(Regex, &'static str)] {
@@ -79,7 +83,7 @@ pub fn init_stderr_logger() {
             fmt::layer()
                 .with_writer(SanitizedStderr)
                 .with_target(false)
-                .without_time()
+                .without_time(),
         )
         .with(filter)
         .init();

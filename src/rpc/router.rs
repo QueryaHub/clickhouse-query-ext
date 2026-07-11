@@ -1,6 +1,6 @@
-use serde_json::Value;
 use crate::error::DriverError;
-use crate::rpc::handlers::{system, connection, query};
+use crate::rpc::handlers::{connection, query, system};
+use serde_json::Value;
 
 pub async fn dispatch(method: &str, params: Option<Value>) -> Result<Value, DriverError> {
     match method {

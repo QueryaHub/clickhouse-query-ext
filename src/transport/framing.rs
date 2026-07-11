@@ -50,6 +50,9 @@ mod tests {
         let output = String::from_utf8(buffer).unwrap();
         assert_eq!(output.matches('\n').count(), 1);
         assert!(output.ends_with('\n'));
-        assert_eq!(output, "{\"jsonrpc\":\"2.0\", \"id\":1,  \"result\":\"ok\"}\n");
+        assert_eq!(
+            output,
+            "{\"jsonrpc\":\"2.0\", \"id\":1,  \"result\":\"ok\"}\n"
+        );
     }
 }

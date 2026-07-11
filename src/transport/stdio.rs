@@ -1,4 +1,4 @@
-use tokio::io::{self, AsyncBufReadExt, BufReader, AsyncRead};
+use tokio::io::{self, AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::sync::mpsc;
 
 /// Asynchronous stdin line reader for NDJSON requests.
@@ -7,16 +7,17 @@ pub async fn start_stdin_reader(tx: mpsc::Sender<String>) -> io::Result<()> {
 }
 
 /// Generic asynchronous line reader for any `AsyncRead` source (useful for testing).
-pub async fn start_reader<R: AsyncRead + Unpin>(source: R, tx: mpsc::Sender<String>) -> io::Result<()> {
+pub async fn start_reader<R: AsyncRead + Unpin>(
+    source: R,
+    tx: mpsc::Sender<String>,
+) -> io::Result<()> {
     let mut reader = BufReader::new(source).lines();
 
     while let Some(line) = reader.next_line().await? {
         let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            if tx.send(trimmed.to_string()).await.is_err() {
-                // Receiver channel dropped, exit loop gracefully
-                break;
-            }
+        if !trimmed.is_empty() && tx.send(trimmed.to_string()).await.is_err() {
+            // Receiver channel dropped, exit loop gracefully
+            break;
         }
     }
     Ok(())
@@ -50,9 +51,7 @@ mod tests {
         let input = b"{\"method\":\"1\"}\n{\"method\":\"2\"}\n{\"method\":\"3\"}\n";
         let (tx, mut rx) = mpsc::channel(1);
 
-        let handle = tokio::spawn(async move {
-            start_reader(&input[..], tx).await
-        });
+        let handle = tokio::spawn(async move { start_reader(&input[..], tx).await });
 
         // Read only first message then drop rx
         let line1 = rx.recv().await.unwrap();
