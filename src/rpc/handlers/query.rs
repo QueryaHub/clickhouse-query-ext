@@ -29,6 +29,15 @@ pub struct CancelParams {
     pub sync: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KillMutationParams {
+    pub connection_id: u64,
+    pub mutation_id: String,
+    #[serde(default = "default_true")]
+    pub sync: bool,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -210,6 +219,8 @@ fn build_non_tabular_result(
         "alter"
     } else if upper_sql.starts_with("INSERT ") {
         "insert"
+    } else if upper_sql.starts_with("KILL ") {
+        "kill"
     } else {
         "execute"
     };
@@ -243,6 +254,12 @@ fn build_non_tabular_result(
                 "Partition operation completed successfully in {}ms",
                 elapsed
             )
+        }
+    } else if operation == "kill" {
+        if upper_sql.contains("MUTATION") {
+            format!("Mutation(s) killed successfully in {}ms", elapsed)
+        } else {
+            format!("Query/process(es) killed successfully in {}ms", elapsed)
         }
     } else {
         format!("Command completed successfully in {}ms", elapsed)
@@ -320,6 +337,70 @@ pub async fn handle_cancel(params: Option<Value>) -> Result<Value, DriverError> 
         let text = resp.text().await.unwrap_or_default();
         return Err(DriverError::Client(format!(
             "Failed to cancel query: {}",
+            text
+        )));
+    }
+
+    Ok(json!({ "ok": true }))
+}
+
+/// Handler for `db.killMutation`.
+/// Sends `KILL MUTATION WHERE mutation_id = '...' ASYNC/SYNC` to abort active mutations.
+pub async fn handle_kill_mutation(params: Option<Value>) -> Result<Value, DriverError> {
+    let params_val = params.ok_or_else(|| DriverError::Rpc {
+        code: -32602,
+        message: "Invalid params: db.killMutation requires connectionId and mutationId".to_string(),
+        data: None,
+    })?;
+
+    let kill_params: KillMutationParams =
+        serde_json::from_value(params_val).map_err(|e| DriverError::Rpc {
+            code: -32602,
+            message: format!("Malformed killMutation parameters: {}", e),
+            data: None,
+        })?;
+
+    let client = ConnectionPool::global()
+        .get(kill_params.connection_id)
+        .ok_or_else(|| DriverError::ConnectionNotFound(kill_params.connection_id))?;
+
+    info!(
+        "Killing mutationId={} on connectionId={}",
+        kill_params.mutation_id, kill_params.connection_id
+    );
+
+    if client.base_url.starts_with("mock://") || client.base_url.starts_with("test://") {
+        return Ok(json!({ "ok": true }));
+    }
+
+    let sync_kw = if kill_params.sync { "SYNC" } else { "ASYNC" };
+    let mut url = Url::parse(&client.base_url)?;
+    url.query_pairs_mut()
+        .append_pair("database", &client.database)
+        .append_pair(
+            "query",
+            &format!(
+                "KILL MUTATION WHERE mutation_id = '{}' {}",
+                kill_params.mutation_id, sync_kw
+            ),
+        );
+
+    let mut req = client.http_client.post(url);
+    if let Some(secrets) = ConnectionSecretsPool::global().get(client.connection_id) {
+        if let Some(jwt) = secrets.expose_jwt_token() {
+            req = req.header("Authorization", format!("Bearer {}", jwt));
+        } else if let Some(pass) = secrets.expose_password() {
+            req = req
+                .header("X-ClickHouse-User", &client.user)
+                .header("X-ClickHouse-Key", pass);
+        }
+    }
+
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(DriverError::Client(format!(
+            "Failed to kill mutation: {}",
             text
         )));
     }
@@ -562,5 +643,69 @@ mod tests {
         );
 
         ConnectionPool::global().remove(666);
+    }
+
+    #[tokio::test]
+    async fn test_handle_kill_mutation() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 777,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let res = handle_kill_mutation(Some(json!({
+            "connectionId": 777,
+            "mutationId": "mut_123"
+        })))
+        .await
+        .unwrap();
+        assert_eq!(res["ok"], true);
+
+        ConnectionPool::global().remove(777);
+    }
+
+    #[tokio::test]
+    async fn test_kill_status_messages() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 778,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let mut_kill = handle_query(Some(json!({
+            "connectionId": 778,
+            "sql": "KILL MUTATION WHERE mutation_id = 'mut_123'"
+        })))
+        .await
+        .unwrap();
+        assert_eq!(mut_kill["operation"], "kill");
+        assert!(
+            mut_kill["message"]
+                .as_str()
+                .unwrap()
+                .contains("Mutation(s) killed successfully")
+        );
+
+        let q_kill = handle_query(Some(json!({
+            "connectionId": 778,
+            "sql": "KILL QUERY WHERE elapsed > 100"
+        })))
+        .await
+        .unwrap();
+        assert_eq!(q_kill["operation"], "kill");
+        assert!(
+            q_kill["message"]
+                .as_str()
+                .unwrap()
+                .contains("Query/process(es) killed successfully")
+        );
+
+        ConnectionPool::global().remove(778);
     }
 }
