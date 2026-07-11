@@ -239,6 +239,44 @@ pub fn get_context_actions_for_node(
                 ),
             ])
         }
+        "column" => {
+            if parts.len() < 4 {
+                return Err(DriverError::Client(format!(
+                    "Invalid nodeId for column context actions: '{}'",
+                    node_id
+                )));
+            }
+            let db_name = parts[1];
+            let table_name = parts[2];
+            let col_name = parts[3];
+
+            Ok(vec![
+                SduiContextAction::new(
+                    "column.stats",
+                    "📈 Column Statistics (Быстрый профайлер)",
+                    Some("bar-chart"),
+                    "query",
+                    Some(format!(
+                        "SELECT count() as total_rows, countIf(isNotNull({0})) as not_nulls, uniqExact({0}) as unique_exact, min({0}) as min_val, max({0}) as max_val, topK(5)({0}) as top_5_values FROM {1}.{2}",
+                        col_name, db_name, table_name
+                    )),
+                    false,
+                    false,
+                ),
+                SduiContextAction::new(
+                    "column.top_10",
+                    "🔝 Top 10 Frequent Values",
+                    Some("list"),
+                    "query",
+                    Some(format!(
+                        "SELECT {0}, count() as cnt FROM {1}.{2} GROUP BY {0} ORDER BY cnt DESC LIMIT 10",
+                        col_name, db_name, table_name
+                    )),
+                    false,
+                    false,
+                ),
+            ])
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -301,8 +339,32 @@ mod tests {
     }
 
     #[test]
+    fn test_column_context_actions() {
+        let actions =
+            get_context_actions_for_node("column", "col.analytics.events.user_id").unwrap();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].id, "column.stats");
+        assert_eq!(
+            actions[0].sql.as_deref(),
+            Some(
+                "SELECT count() as total_rows, countIf(isNotNull(user_id)) as not_nulls, uniqExact(user_id) as unique_exact, min(user_id) as min_val, max(user_id) as max_val, topK(5)(user_id) as top_5_values FROM analytics.events"
+            )
+        );
+        assert_eq!(actions[0].action_type, "query");
+
+        assert_eq!(actions[1].id, "column.top_10");
+        assert_eq!(
+            actions[1].sql.as_deref(),
+            Some(
+                "SELECT user_id, count() as cnt FROM analytics.events GROUP BY user_id ORDER BY cnt DESC LIMIT 10"
+            )
+        );
+    }
+
+    #[test]
     fn test_invalid_node_id() {
         assert!(get_context_actions_for_node("table", "table.only").is_err());
         assert!(get_context_actions_for_node("partition", "part.only.two").is_err());
+        assert!(get_context_actions_for_node("column", "col.only.two").is_err());
     }
 }
