@@ -1,11 +1,9 @@
 use crate::driver::pool::ConnectionPool;
 use crate::error::DriverError;
 use crate::sdui::tree::*;
-use crate::utils::secret_guard::ConnectionSecretsPool;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
-use url::Url;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -34,44 +32,7 @@ async fn run_introspection_query(connection_id: u64, sql: &str) -> Result<String
         .get(connection_id)
         .ok_or_else(|| DriverError::ConnectionNotFound(connection_id))?;
 
-    if client.base_url.starts_with("mock://") || client.base_url.starts_with("test://") {
-        return Ok(String::new());
-    }
-
-    let mut url = Url::parse(&client.base_url)?;
-    url.query_pairs_mut()
-        .append_pair("database", &client.database);
-    if client.readonly {
-        url.query_pairs_mut()
-            .append_pair("readonly", "1")
-            .append_pair("max_execution_time", "300")
-            .append_pair("max_memory_usage", "10000000000");
-    }
-
-    let mut req = client.http_client.post(url).body(sql.to_string());
-    if let Some(secrets) = ConnectionSecretsPool::global().get(client.connection_id) {
-        if let Some(jwt) = secrets.expose_jwt_token() {
-            req = req.header("Authorization", format!("Bearer {}", jwt));
-        } else if let Some(pass) = secrets.expose_password() {
-            req = req
-                .header("X-ClickHouse-User", &client.user)
-                .header("X-ClickHouse-Key", pass);
-        }
-    } else {
-        req = req.header("X-ClickHouse-User", &client.user);
-    }
-
-    let resp = req.send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(DriverError::Client(format!(
-            "Introspection query error {}: {}",
-            status, text
-        )));
-    }
-
-    Ok(resp.text().await?)
+    client.post_sql(sql, |_| {}).await
 }
 
 /// Handler for `db.getSchemaTree`. Returns root database nodes (`SYSTEM.databases`).

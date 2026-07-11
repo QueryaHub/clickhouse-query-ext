@@ -1,7 +1,9 @@
 use crate::error::DriverError;
 use crate::utils::secret_guard::ConnectionSecretsPool;
-use reqwest::{Client, ClientBuilder};
+use reqwest::{Client, ClientBuilder, RequestBuilder};
 use serde::Deserialize;
+use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use url::Url;
 
@@ -18,13 +20,16 @@ pub struct ConnectParams {
     pub readonly: Option<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ClickHouseClient {
     pub connection_id: u64,
     pub base_url: String,
     pub user: String,
     pub database: String,
     pub readonly: bool,
+    /// When true, omit `readonly=1` on HTTP requests because the server/user
+    /// profile already enforces read-only mode.
+    server_enforces_readonly: AtomicBool,
     pub http_client: Client,
 }
 
@@ -52,8 +57,7 @@ impl ClickHouseClient {
                 } else {
                     params.database.unwrap_or_else(|| "default".to_string())
                 };
-                // Safe Mode: default to readonly = true unless explicitly disabled
-                let readonly = params.readonly.unwrap_or(true);
+                let readonly = params.readonly.unwrap_or(false);
                 let base = format!("{}://{}:{}", scheme, host, port);
                 (base, user, database, readonly)
             }
@@ -62,7 +66,7 @@ impl ClickHouseClient {
             let port = params.port.unwrap_or(8123);
             let user = params.user.unwrap_or_else(|| "default".to_string());
             let database = params.database.unwrap_or_else(|| "default".to_string());
-            let readonly = params.readonly.unwrap_or(true);
+            let readonly = params.readonly.unwrap_or(false);
             (
                 format!("http://{}:{}", host, port),
                 user,
@@ -82,31 +86,51 @@ impl ClickHouseClient {
             user,
             database,
             readonly,
+            server_enforces_readonly: AtomicBool::new(false),
             http_client,
         })
     }
 
-    /// Check connection health by executing `SELECT version()` against ClickHouse.
-    /// Utilizes zero-trust `ConnectionSecretsPool` for authentication headers without persisting secrets in struct memory.
-    pub async fn ping_connection(&self) -> Result<String, DriverError> {
-        if self.base_url.starts_with("mock://") || self.base_url.starts_with("test://") {
-            return Ok("mock-clickhouse-23.8.1.1".to_string());
-        }
+    /// Appends Safe Mode session settings to a ClickHouse HTTP URL.
+    pub fn append_safe_mode_settings(&self, url: &mut Url) {
+        self.append_safe_mode_settings_with(url, self.omit_readonly_setting());
+    }
 
-        let mut url = Url::parse(&self.base_url)?;
+    fn omit_readonly_setting(&self) -> bool {
+        self.server_enforces_readonly.load(Ordering::Relaxed)
+    }
+
+    fn append_safe_mode_settings_with(&self, url: &mut Url, omit_readonly_setting: bool) {
+        if !self.readonly {
+            return;
+        }
+        if !omit_readonly_setting {
+            url.query_pairs_mut().append_pair("readonly", "1");
+        }
         url.query_pairs_mut()
-            .append_pair("query", "SELECT version()")
-            .append_pair("database", &self.database);
-        if self.readonly {
-            url.query_pairs_mut()
-                .append_pair("readonly", "1")
-                .append_pair("max_execution_time", "300")
-                .append_pair("max_memory_usage", "10000000000");
+            .append_pair("max_execution_time", "300")
+            .append_pair("max_memory_usage", "10000000000");
+    }
+
+    fn mark_server_readonly_enforced(&self) {
+        self.server_enforces_readonly
+            .store(true, Ordering::Relaxed);
+    }
+
+    /// Returns true when ClickHouse rejects `readonly=1` because the session is
+    /// already read-only at server/profile level.
+    pub fn is_readonly_setting_conflict(err: &DriverError) -> bool {
+        match err {
+            DriverError::Client(msg) => {
+                msg.contains("Cannot modify 'readonly' setting in readonly mode")
+                    || msg.contains("Code: 164")
+                    || msg.contains("(READONLY)")
+            }
+            _ => false,
         }
+    }
 
-        let mut req = self.http_client.get(url);
-
-        // Retrieve secret securely just-in-time from ConnectionSecretsPool
+    fn apply_auth(&self, mut req: RequestBuilder) -> RequestBuilder {
         if let Some(secrets) = ConnectionSecretsPool::global().get(self.connection_id) {
             if let Some(jwt) = secrets.expose_jwt_token() {
                 req = req.header("Authorization", format!("Bearer {}", jwt));
@@ -120,8 +144,10 @@ impl ClickHouseClient {
         } else {
             req = req.header("X-ClickHouse-User", &self.user);
         }
+        req
+    }
 
-        let resp = req.send().await?;
+    async fn read_response(resp: reqwest::Response) -> Result<String, DriverError> {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
@@ -130,9 +156,81 @@ impl ClickHouseClient {
                 status, text
             )));
         }
+        Ok(resp.text().await?)
+    }
 
-        let version = resp.text().await?.trim().to_string();
-        Ok(version)
+    pub async fn execute_with_readonly_retry<F, Fut>(&self, mut run: F) -> Result<String, DriverError>
+    where
+        F: FnMut(bool) -> Fut,
+        Fut: Future<Output = Result<String, DriverError>>,
+    {
+        let mut omit = self.omit_readonly_setting();
+        loop {
+            match run(omit).await {
+                Ok(text) => return Ok(text),
+                Err(err) if self.readonly && !omit && Self::is_readonly_setting_conflict(&err) => {
+                    self.mark_server_readonly_enforced();
+                    omit = true;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Executes a GET request with optional SQL in the `query` URL parameter.
+    pub async fn get_with_query(&self, sql: &str) -> Result<String, DriverError> {
+        if self.base_url.starts_with("mock://") || self.base_url.starts_with("test://") {
+            return Ok("mock-clickhouse-23.8.1.1".to_string());
+        }
+
+        self.execute_with_readonly_retry(|omit_readonly| async move {
+            let mut url = Url::parse(&self.base_url)?;
+            url.query_pairs_mut()
+                .append_pair("query", sql)
+                .append_pair("database", &self.database);
+            self.append_safe_mode_settings_with(&mut url, omit_readonly);
+            let req = self.apply_auth(self.http_client.get(url));
+            Self::read_response(req.send().await?).await
+        })
+        .await
+    }
+
+    /// Executes a POST request with SQL in the request body.
+    pub async fn post_sql(
+        &self,
+        sql: &str,
+        mut extra_params: impl FnMut(&mut Url),
+    ) -> Result<String, DriverError> {
+        if self.base_url.starts_with("mock://") || self.base_url.starts_with("test://") {
+            return Ok(String::new());
+        }
+
+        let sql = sql.to_string();
+        let mut omit = self.omit_readonly_setting();
+        loop {
+            let mut url = Url::parse(&self.base_url)?;
+            url.query_pairs_mut()
+                .append_pair("database", &self.database);
+            extra_params(&mut url);
+            self.append_safe_mode_settings_with(&mut url, omit);
+            let req = self
+                .apply_auth(self.http_client.post(url))
+                .body(sql.clone());
+            match Self::read_response(req.send().await?).await {
+                Ok(text) => return Ok(text),
+                Err(err) if self.readonly && !omit && Self::is_readonly_setting_conflict(&err) => {
+                    self.mark_server_readonly_enforced();
+                    omit = true;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    /// Check connection health by executing `SELECT version()` against ClickHouse.
+    pub async fn ping_connection(&self) -> Result<String, DriverError> {
+        let version = self.get_with_query("SELECT version()").await?;
+        Ok(version.trim().to_string())
     }
 }
 
@@ -145,6 +243,7 @@ mod tests {
         let params = ConnectParams {
             connection_id: 1,
             connection_string: Some("http://admin@localhost:8123/analytics?readonly=1".to_string()),
+            readonly: Some(true),
             ..Default::default()
         };
         let client = ClickHouseClient::from_params(params).unwrap();
@@ -169,7 +268,6 @@ mod tests {
 
     #[test]
     fn test_from_params_safe_mode_aliases() {
-        // Test parsing safe_mode alias via serde
         let json_val = serde_json::json!({
             "connectionId": 10,
             "host": "localhost",
@@ -187,5 +285,31 @@ mod tests {
         let params_off: ConnectParams = serde_json::from_value(json_val_off).unwrap();
         let client_off = ClickHouseClient::from_params(params_off).unwrap();
         assert!(!client_off.readonly);
+    }
+
+    #[test]
+    fn test_append_safe_mode_settings_omits_readonly_when_server_enforces() {
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 3,
+            host: Some("localhost".to_string()),
+            readonly: Some(true),
+            ..Default::default()
+        })
+        .unwrap();
+        client.mark_server_readonly_enforced();
+
+        let mut url = Url::parse("http://localhost:8123").unwrap();
+        client.append_safe_mode_settings(&mut url);
+        let query = url.query().unwrap_or_default();
+        assert!(!query.contains("readonly=1"));
+        assert!(query.contains("max_execution_time=300"));
+    }
+
+    #[test]
+    fn test_is_readonly_setting_conflict() {
+        let err = DriverError::Client(
+            "ClickHouse HTTP error 500 Internal Server Error: Code: 164. DB::Exception: Cannot modify 'readonly' setting in readonly mode. (READONLY)".to_string(),
+        );
+        assert!(ClickHouseClient::is_readonly_setting_conflict(&err));
     }
 }

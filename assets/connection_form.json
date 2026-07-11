@@ -24,6 +24,14 @@
       "defaultValue": "default"
     },
     {
+      "key": "database",
+      "label": "База данных по умолчанию",
+      "type": "text",
+      "required": false,
+      "defaultValue": "default",
+      "helperText": "Имя базы ClickHouse для подключения и дерева схемы"
+    },
+    {
       "key": "password",
       "label": "Пароль",
       "type": "password",

@@ -99,9 +99,14 @@ cargo test --verbose --all
 
 # Сборка релизного бинарного файла драйвера
 cargo build --release
+
+# Упаковка .qext для Querya Desktop (manifest + assets + bin/)
+./scripts/package_qext.sh
 ```
 
-После успешной сборки исполняемый файл будет доступен по пути `target/release/clickhouse-query-ext`.
+После успешной сборки:
+- Бинарник: `target/release/clickhouse-query-ext`
+- Пакет для установки: `dist/clickhouse-query-ext-1.0.1.qext` (+ `.sha256`)
 
 ---
 
