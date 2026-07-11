@@ -121,22 +121,27 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
 
     // 2. Mock handler for unit tests
     if client.base_url.starts_with("mock://") || client.base_url.starts_with("test://") {
-        let mock_output = if is_tabular_query {
-            r#"["id", "event_name", "user_id"]
+        if is_tabular_query {
+            let mock_output = r#"["id", "event_name", "user_id"]
 ["UInt64", "String", "Nullable(UInt64)"]
 [18446744073709551615, "page_view", 42]
-[100, "click", null]"#
+[100, "click", null]"#;
+            let mut parsed_val = serde_json::to_value(parse_compact_output(
+                mock_output,
+                start_time.elapsed().as_millis() as u64,
+            )?)?;
+            if let Some(obj) = parsed_val.as_object_mut() {
+                obj.insert("queryId".to_string(), json!(actual_query_id));
+            }
+            return Ok(parsed_val);
         } else {
-            ""
-        };
-        let mut parsed_val = serde_json::to_value(parse_compact_output(
-            mock_output,
-            start_time.elapsed().as_millis() as u64,
-        )?)?;
-        if let Some(obj) = parsed_val.as_object_mut() {
-            obj.insert("queryId".to_string(), json!(actual_query_id));
+            return Ok(build_non_tabular_result(
+                &upper_sql,
+                start_time.elapsed().as_millis() as u64,
+                0,
+                &actual_query_id,
+            ));
         }
-        return Ok(parsed_val);
     }
 
     // 3. Real ClickHouse HTTP request
@@ -184,17 +189,60 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
         }
         Ok(parsed_val)
     } else {
-        Ok(json!({
-            "queryId": actual_query_id,
-            "columns": [],
-            "rows": [],
-            "statistics": {
-                "rowsRead": 0,
-                "bytesRead": text.len(),
-                "elapsedMs": elapsed
-            }
-        }))
+        Ok(build_non_tabular_result(
+            &upper_sql,
+            elapsed,
+            text.len(),
+            &actual_query_id,
+        ))
     }
+}
+
+fn build_non_tabular_result(
+    upper_sql: &str,
+    elapsed: u64,
+    bytes_read: usize,
+    query_id: &str,
+) -> Value {
+    let operation = if upper_sql.starts_with("OPTIMIZE TABLE") {
+        "optimize"
+    } else if upper_sql.starts_with("ALTER ") {
+        "alter"
+    } else if upper_sql.starts_with("INSERT ") {
+        "insert"
+    } else {
+        "execute"
+    };
+
+    let status_msg = if operation == "optimize" {
+        if upper_sql.contains("DEDUPLICATE") {
+            format!(
+                "Table deduplication completed successfully in {}ms",
+                elapsed
+            )
+        } else {
+            format!(
+                "Table optimization (FINAL) completed successfully in {}ms",
+                elapsed
+            )
+        }
+    } else {
+        format!("Command completed successfully in {}ms", elapsed)
+    };
+
+    json!({
+        "queryId": query_id,
+        "status": "completed",
+        "operation": operation,
+        "message": status_msg,
+        "columns": [],
+        "rows": [],
+        "statistics": {
+            "rowsRead": 0,
+            "bytesRead": bytes_read,
+            "elapsedMs": elapsed
+        }
+    })
 }
 
 /// Handler for `db.cancelQuery`.
@@ -379,5 +427,49 @@ mod tests {
         );
 
         ConnectionPool::global().remove(444);
+    }
+
+    #[tokio::test]
+    async fn test_handle_query_optimize_final_and_deduplicate() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 555,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        // OPTIMIZE FINAL
+        let query_params = json!({
+            "connectionId": 555,
+            "sql": "OPTIMIZE TABLE analytics.events FINAL"
+        });
+        let res = handle_query(Some(query_params)).await.unwrap();
+        assert_eq!(res["status"], "completed");
+        assert_eq!(res["operation"], "optimize");
+        assert!(
+            res["message"]
+                .as_str()
+                .unwrap()
+                .contains("Table optimization (FINAL) completed successfully")
+        );
+
+        // OPTIMIZE DEDUPLICATE
+        let query_params_dedup = json!({
+            "connectionId": 555,
+            "sql": "OPTIMIZE TABLE analytics.events DEDUPLICATE"
+        });
+        let res_dedup = handle_query(Some(query_params_dedup)).await.unwrap();
+        assert_eq!(res_dedup["status"], "completed");
+        assert_eq!(res_dedup["operation"], "optimize");
+        assert!(
+            res_dedup["message"]
+                .as_str()
+                .unwrap()
+                .contains("Table deduplication completed successfully")
+        );
+
+        ConnectionPool::global().remove(555);
     }
 }
