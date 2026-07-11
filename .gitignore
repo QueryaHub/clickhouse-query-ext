@@ -4,3 +4,4 @@
 *.log
 /scratch/
 .env
+/dist/
