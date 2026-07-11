@@ -231,44 +231,13 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
     }
 
     // 3. Real ClickHouse HTTP request
-    let mut url = Url::parse(&client.base_url)?;
-    url.query_pairs_mut()
-        .append_pair("database", &client.database)
-        .append_pair("query_id", &actual_query_id);
-    if client.readonly {
-        url.query_pairs_mut()
-            .append_pair("readonly", "1")
-            .append_pair("max_execution_time", "300")
-            .append_pair("max_memory_usage", "10000000000");
-    }
-
-    let mut req = client.http_client.post(url).body(sql_to_run);
-
-    if let Some(secrets) = ConnectionSecretsPool::global().get(client.connection_id) {
-        if let Some(jwt) = secrets.expose_jwt_token() {
-            req = req.header("Authorization", format!("Bearer {}", jwt));
-        } else if let Some(pass) = secrets.expose_password() {
-            req = req
-                .header("X-ClickHouse-User", &client.user)
-                .header("X-ClickHouse-Key", pass);
-        } else {
-            req = req.header("X-ClickHouse-User", &client.user);
-        }
-    } else {
-        req = req.header("X-ClickHouse-User", &client.user);
-    }
-
-    let resp = req.send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        return Err(DriverError::Client(format!(
-            "ClickHouse SQL error {}: {}",
-            status, text
-        )));
-    }
-
-    let text = resp.text().await?;
+    let actual_query_id_for_url = actual_query_id.clone();
+    let text = client
+        .post_sql(&sql_to_run, |url| {
+            url.query_pairs_mut()
+                .append_pair("query_id", &actual_query_id_for_url);
+        })
+        .await?;
     let elapsed = start_time.elapsed().as_millis() as u64;
 
     if is_tabular_query {

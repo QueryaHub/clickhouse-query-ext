@@ -1,7 +1,7 @@
 {
   "id": "queryahub.clickhouse-driver",
   "name": "ClickHouse Database Driver (Analyst Edition)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "publisher": "Querya Community",
   "description": "Изолированный нативный Rust-драйвер для аналитической СУБД ClickHouse с полной поддержкой MergeTree, словарей, партиций и SDUI-интроспекции.",
   "type": "database_driver",

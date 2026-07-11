@@ -69,6 +69,10 @@ cp "${BIN_PATH}" "${STAGING_DIR}/bin/${DEST_BIN_NAME}"
 if [ "${DEST_BIN_NAME}" != "${BIN_NAME}" ] && [ ! -f "${STAGING_DIR}/bin/${BIN_NAME}" ]; then
   cp "${BIN_PATH}" "${STAGING_DIR}/bin/${BIN_NAME}"
 fi
+chmod +x "${STAGING_DIR}/bin/${DEST_BIN_NAME}"
+if [ -f "${STAGING_DIR}/bin/${BIN_NAME}" ]; then
+  chmod +x "${STAGING_DIR}/bin/${BIN_NAME}"
+fi
 
 # 3. Create .qext (.zip) archive using python zipfile module or zip CLI
 ARCHIVE_NAME="clickhouse-query-ext-${VERSION}-${TARGET}.qext"
