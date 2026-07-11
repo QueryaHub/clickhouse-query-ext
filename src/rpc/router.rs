@@ -85,4 +85,21 @@ mod tests {
 
         ConnectionPool::global().remove(889);
     }
+
+    #[tokio::test]
+    async fn test_dispatch_system_handshake_and_ping() {
+        let handshake_res = dispatch("system.handshake", None).await.unwrap();
+        assert_eq!(handshake_res["protocolVersion"], 1);
+        assert!(handshake_res["capabilities"].is_array());
+
+        let ping_res = dispatch("system.ping", None).await.unwrap();
+        assert_eq!(ping_res, json!("pong"));
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_unknown_method_error() {
+        let err = dispatch("unknown.rpc.method", None).await.unwrap_err();
+        assert_eq!(err.to_rpc_code(), -32601);
+        assert!(err.to_string().contains("Method not found"));
+    }
 }

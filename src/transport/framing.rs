@@ -55,4 +55,14 @@ mod tests {
             "{\"jsonrpc\":\"2.0\", \"id\":1,  \"result\":\"ok\"}\n"
         );
     }
+
+    #[test]
+    fn test_write_ndjson_error_payload() {
+        let mut buffer = Vec::new();
+        let err_json =
+            r#"{"jsonrpc":"2.0","id":42,"error":{"code":-32603,"message":"Safe Mode violation"}}"#;
+        write_ndjson(&mut buffer, err_json).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert_eq!(output, format!("{}\n", err_json));
+    }
 }
