@@ -245,6 +245,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_query_in_mock_mode() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
         let client = ClickHouseClient::from_params(ConnectParams {
             connection_id: 111,
             connection_string: Some("mock://localhost:8123/default?readonly=1".to_string()),
@@ -270,6 +271,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_query_blocked_by_safe_mode() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
         let client = ClickHouseClient::from_params(ConnectParams {
             connection_id: 222,
             connection_string: Some("mock://localhost:8123/default?readonly=1".to_string()),
@@ -291,6 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_cancel() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
         let client = ClickHouseClient::from_params(ConnectParams {
             connection_id: 333,
             connection_string: Some("mock://localhost:8123/default".to_string()),

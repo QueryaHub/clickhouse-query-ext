@@ -97,19 +97,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_connect_and_disconnect() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
         let connect_json = json!({
             "connectionId": 777,
             "connectionString": "mock://localhost:8123/default?readonly=1"
         });
 
         let res = handle_connect(Some(connect_json)).await.unwrap();
-        assert_eq!(res["connected"], true);
+        assert!(res["connected"].as_bool().unwrap_or(false));
         assert_eq!(res["serverVersion"], "mock-clickhouse-23.8.1.1");
         assert!(ConnectionPool::global().get(777).is_some());
 
         let disconnect_json = json!({ "connectionId": 777 });
         let res_dis = handle_disconnect(Some(disconnect_json)).await.unwrap();
-        assert_eq!(res_dis["ok"], true);
+        assert!(res_dis["ok"].as_bool().unwrap_or(false));
         assert!(ConnectionPool::global().get(777).is_none());
     }
 }
