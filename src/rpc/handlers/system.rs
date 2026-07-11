@@ -107,7 +107,7 @@ mod tests {
             "pluginId": "queryahub.clickhouse-driver"
         });
         let res = handle_handshake(Some(params)).await.unwrap();
-        assert_eq!(res["ok"], true);
+        assert!(res["ok"].as_bool().unwrap_or(false));
         assert_eq!(res["protocolVersion"], 1);
         assert_eq!(res["driverVersion"], "1.0.0-rust");
         let caps = res["capabilities"].as_array().unwrap();
@@ -125,6 +125,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_inject_credentials() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
         let params = json!({
             "connectionId": 999,
             "password": "ClickHouseSecurePassword999",
@@ -148,6 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_shutdown_wipes_pool() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
         ConnectionSecretsPool::global().inject(888, Some("pass".to_string()), None);
         assert!(ConnectionSecretsPool::global().get(888).is_some());
 
