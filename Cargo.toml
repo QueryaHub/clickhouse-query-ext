@@ -25,6 +25,7 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # Logging to stderr only
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+regex = "1"
 
 # Error handling
 thiserror = "2.0"
