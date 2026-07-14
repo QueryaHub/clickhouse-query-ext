@@ -256,6 +256,216 @@ pub async fn handle_context_actions(params: Option<Value>) -> Result<Value, Driv
     Ok(json!({ "actions": actions }))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetServerStatsParams {
+    pub connection_id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetObjectMetadataParams {
+    pub connection_id: u64,
+    pub node_id: String,
+    pub node_type: String,
+}
+
+/// Handler for `db.getCapabilities`. Returns capability feature flags reported by the driver.
+pub async fn handle_get_capabilities(_params: Option<Value>) -> Result<Value, DriverError> {
+    Ok(json!({
+        "supportsTransactions": false,
+        "supportsCancel": true,
+        "supportsDDLInspection": true,
+        "supportsPrivileges": false,
+        "hasServerStats": true
+    }))
+}
+
+/// Handler for `db.getServerStats`. Returns server version, uptime, and database sizes.
+pub async fn handle_get_server_stats(params: Option<Value>) -> Result<Value, DriverError> {
+    let params_val = params.ok_or_else(|| DriverError::Rpc {
+        code: -32602,
+        message: "Invalid params: db.getServerStats requires connectionId".to_string(),
+        data: None,
+    })?;
+
+    let p: GetServerStatsParams =
+        serde_json::from_value(params_val).map_err(|e| DriverError::Rpc {
+            code: -32602,
+            message: format!("Malformed getServerStats parameters: {}", e),
+            data: None,
+        })?;
+
+    let client = ConnectionPool::global()
+        .get(p.connection_id)
+        .ok_or_else(|| DriverError::ConnectionNotFound(p.connection_id))?;
+
+    if client.base_url.starts_with("mock://") || client.base_url.starts_with("test://") {
+        return Ok(json!({
+            "serverVersion": "ClickHouse 24.3 (Mock)",
+            "uptimeSeconds": 3600,
+            "activeConnections": 5,
+            "activeQueries": 2,
+            "memoryUsageBytes": 134217728,
+            "databaseSizes": {
+                "default": 10485760,
+                "system": 2097152,
+                "analytics": 524288000
+            },
+            "extraMetrics": {
+                "queriesPerSecond": 14.5
+            }
+        }));
+    }
+
+    let version_text = client
+        .post_sql("SELECT version() FORMAT JSONCompactEachRow", |_| {})
+        .await
+        .unwrap_or_else(|_| r#"["ClickHouse unknown"]"#.to_string());
+    let uptime_text = client
+        .post_sql("SELECT uptime() FORMAT JSONCompactEachRow", |_| {})
+        .await
+        .unwrap_or_else(|_| r#"[0]"#.to_string());
+
+    let mut version_str = "ClickHouse".to_string();
+    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&version_text, 0) {
+        if let Some(row) = parsed.rows.first() {
+            if let Some(v) = row.first().and_then(|x| x.as_str()) {
+                version_str = format!("ClickHouse {}", v);
+            }
+        }
+    }
+
+    let mut uptime_sec = 0;
+    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&uptime_text, 0) {
+        if let Some(row) = parsed.rows.first() {
+            if let Some(v) = row.first().and_then(|x| x.as_u64()) {
+                uptime_sec = v;
+            }
+        }
+    }
+
+    let db_sizes_text = client
+        .post_sql(
+            "SELECT database, sum(total_bytes) FROM system.tables GROUP BY database FORMAT JSONCompactEachRowWithNamesAndTypes",
+            |_| {},
+        )
+        .await
+        .unwrap_or_default();
+    let mut db_sizes = serde_json::Map::new();
+    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&db_sizes_text, 0) {
+        for row in parsed.rows {
+            if let (Some(db), Some(size)) = (
+                row.first().and_then(|x| x.as_str()),
+                row.get(1).and_then(|x| x.as_u64()),
+            ) {
+                db_sizes.insert(db.to_string(), json!(size));
+            }
+        }
+    }
+
+    Ok(json!({
+        "serverVersion": version_str,
+        "uptimeSeconds": uptime_sec,
+        "activeConnections": 1,
+        "activeQueries": 1,
+        "memoryUsageBytes": 0,
+        "databaseSizes": db_sizes,
+        "extraMetrics": {}
+    }))
+}
+
+/// Handler for `db.getObjectMetadata`. Returns table/view DDL and column list.
+pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, DriverError> {
+    let params_val = params.ok_or_else(|| DriverError::Rpc {
+        code: -32602,
+        message: "Invalid params: db.getObjectMetadata requires connectionId, nodeId, and nodeType"
+            .to_string(),
+        data: None,
+    })?;
+
+    let p: GetObjectMetadataParams =
+        serde_json::from_value(params_val).map_err(|e| DriverError::Rpc {
+            code: -32602,
+            message: format!("Malformed getObjectMetadata parameters: {}", e),
+            data: None,
+        })?;
+
+    let client = ConnectionPool::global()
+        .get(p.connection_id)
+        .ok_or_else(|| DriverError::ConnectionNotFound(p.connection_id))?;
+
+    let parts: Vec<&str> = p.node_id.split('.').collect();
+    let (db_name, tbl_name) =
+        if parts.len() >= 3 && (parts[0] == "table" || parts[0] == "view") {
+            (parts[1], parts[2])
+        } else if parts.len() >= 2 {
+            (parts[0], parts[1])
+        } else {
+            ("default", p.node_id.as_str())
+        };
+
+    if client.base_url.starts_with("mock://") || client.base_url.starts_with("test://") {
+        return Ok(json!({
+            "nodeId": p.node_id,
+            "nodeType": p.node_type,
+            "ddl": format!("CREATE TABLE {}.{} (\n  id UInt64,\n  created_at DateTime\n) ENGINE = MergeTree ORDER BY id", db_name, tbl_name),
+            "columns": [
+                { "name": "id", "dataType": "UInt64", "isNullable": false, "comment": "Primary ID" },
+                { "name": "created_at", "dataType": "DateTime", "isNullable": false, "comment": "Creation timestamp" }
+            ],
+            "properties": {
+                "engine": "MergeTree"
+            }
+        }));
+    }
+
+    let ddl_sql = format!(
+        "SHOW CREATE TABLE `{}`.`{}` FORMAT JSONCompactEachRow",
+        db_name, tbl_name
+    );
+    let mut ddl_str = String::new();
+    if let Ok(text) = client.post_sql(&ddl_sql, |_| {}).await {
+        if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0) {
+            if let Some(row) = parsed.rows.first() {
+                if let Some(v) = row.first().and_then(|x| x.as_str()) {
+                    ddl_str = v.to_string();
+                }
+            }
+        }
+    }
+
+    let cols_sql = format!(
+        "SELECT name, type, comment FROM system.columns WHERE database = '{}' AND table = '{}' ORDER BY position FORMAT JSONCompactEachRowWithNamesAndTypes",
+        db_name, tbl_name
+    );
+    let mut columns = Vec::new();
+    if let Ok(text) = client.post_sql(&cols_sql, |_| {}).await {
+        if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0) {
+            for row in parsed.rows {
+                let name = row.first().and_then(|x| x.as_str()).unwrap_or("unknown");
+                let col_type = row.get(1).and_then(|x| x.as_str()).unwrap_or("String");
+                let comment = row.get(2).and_then(|x| x.as_str()).unwrap_or("");
+                let is_nullable = col_type.starts_with("Nullable(");
+                columns.push(json!({
+                    "name": name,
+                    "dataType": col_type,
+                    "isNullable": is_nullable,
+                    "comment": comment
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "nodeId": p.node_id,
+        "nodeType": p.node_type,
+        "ddl": ddl_str,
+        "columns": columns,
+        "properties": {}
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,5 +578,58 @@ mod tests {
         assert_eq!(actions[0]["id"], "table.top_100");
 
         ConnectionPool::global().remove(403);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_capabilities() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let res = handle_get_capabilities(None).await.unwrap();
+        assert_eq!(res["supportsCancel"], true);
+        assert_eq!(res["hasServerStats"], true);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_server_stats_mock() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 404,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let res = handle_get_server_stats(Some(json!({ "connectionId": 404 })))
+            .await
+            .unwrap();
+        assert_eq!(res["serverVersion"], "ClickHouse 24.3 (Mock)");
+        assert_eq!(res["uptimeSeconds"], 3600);
+
+        ConnectionPool::global().remove(404);
+    }
+
+    #[tokio::test]
+    async fn test_handle_get_object_metadata_mock() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 405,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let res = handle_get_object_metadata(Some(json!({
+            "connectionId": 405,
+            "nodeId": "table.analytics.events",
+            "nodeType": "table"
+        })))
+        .await
+        .unwrap();
+        assert_eq!(res["nodeId"], "table.analytics.events");
+        assert!(res["ddl"].as_str().unwrap().contains("CREATE TABLE"));
+        assert_eq!(res["columns"].as_array().unwrap().len(), 2);
+
+        ConnectionPool::global().remove(405);
     }
 }
