@@ -396,14 +396,13 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
         .ok_or_else(|| DriverError::ConnectionNotFound(p.connection_id))?;
 
     let parts: Vec<&str> = p.node_id.split('.').collect();
-    let (db_name, tbl_name) =
-        if parts.len() >= 3 && (parts[0] == "table" || parts[0] == "view") {
-            (parts[1], parts[2])
-        } else if parts.len() >= 2 {
-            (parts[0], parts[1])
-        } else {
-            ("default", p.node_id.as_str())
-        };
+    let (db_name, tbl_name) = if parts.len() >= 3 && (parts[0] == "table" || parts[0] == "view") {
+        (parts[1], parts[2])
+    } else if parts.len() >= 2 {
+        (parts[0], parts[1])
+    } else {
+        ("default", p.node_id.as_str())
+    };
 
     if client.base_url.starts_with("mock://") || client.base_url.starts_with("test://") {
         return Ok(json!({
