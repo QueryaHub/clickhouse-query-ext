@@ -328,21 +328,19 @@ pub async fn handle_get_server_stats(params: Option<Value>) -> Result<Value, Dri
         .unwrap_or_else(|_| r#"[0]"#.to_string());
 
     let mut version_str = "ClickHouse".to_string();
-    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&version_text, 0) {
-        if let Some(row) = parsed.rows.first() {
-            if let Some(v) = row.first().and_then(|x| x.as_str()) {
-                version_str = format!("ClickHouse {}", v);
-            }
-        }
+    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&version_text, 0)
+        && let Some(row) = parsed.rows.first()
+        && let Some(v) = row.first().and_then(|x| x.as_str())
+    {
+        version_str = format!("ClickHouse {}", v);
     }
 
     let mut uptime_sec = 0;
-    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&uptime_text, 0) {
-        if let Some(row) = parsed.rows.first() {
-            if let Some(v) = row.first().and_then(|x| x.as_u64()) {
-                uptime_sec = v;
-            }
-        }
+    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&uptime_text, 0)
+        && let Some(row) = parsed.rows.first()
+        && let Some(v) = row.first().and_then(|x| x.as_u64())
+    {
+        uptime_sec = v;
     }
 
     let db_sizes_text = client
@@ -396,14 +394,13 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
         .ok_or_else(|| DriverError::ConnectionNotFound(p.connection_id))?;
 
     let parts: Vec<&str> = p.node_id.split('.').collect();
-    let (db_name, tbl_name) =
-        if parts.len() >= 3 && (parts[0] == "table" || parts[0] == "view") {
-            (parts[1], parts[2])
-        } else if parts.len() >= 2 {
-            (parts[0], parts[1])
-        } else {
-            ("default", p.node_id.as_str())
-        };
+    let (db_name, tbl_name) = if parts.len() >= 3 && (parts[0] == "table" || parts[0] == "view") {
+        (parts[1], parts[2])
+    } else if parts.len() >= 2 {
+        (parts[0], parts[1])
+    } else {
+        ("default", p.node_id.as_str())
+    };
 
     if client.base_url.starts_with("mock://") || client.base_url.starts_with("test://") {
         return Ok(json!({
@@ -425,14 +422,12 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
         db_name, tbl_name
     );
     let mut ddl_str = String::new();
-    if let Ok(text) = client.post_sql(&ddl_sql, |_| {}).await {
-        if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0) {
-            if let Some(row) = parsed.rows.first() {
-                if let Some(v) = row.first().and_then(|x| x.as_str()) {
-                    ddl_str = v.to_string();
-                }
-            }
-        }
+    if let Ok(text) = client.post_sql(&ddl_sql, |_| {}).await
+        && let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0)
+        && let Some(row) = parsed.rows.first()
+        && let Some(v) = row.first().and_then(|x| x.as_str())
+    {
+        ddl_str = v.to_string();
     }
 
     let cols_sql = format!(
@@ -440,20 +435,20 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
         db_name, tbl_name
     );
     let mut columns = Vec::new();
-    if let Ok(text) = client.post_sql(&cols_sql, |_| {}).await {
-        if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0) {
-            for row in parsed.rows {
-                let name = row.first().and_then(|x| x.as_str()).unwrap_or("unknown");
-                let col_type = row.get(1).and_then(|x| x.as_str()).unwrap_or("String");
-                let comment = row.get(2).and_then(|x| x.as_str()).unwrap_or("");
-                let is_nullable = col_type.starts_with("Nullable(");
-                columns.push(json!({
-                    "name": name,
-                    "dataType": col_type,
-                    "isNullable": is_nullable,
-                    "comment": comment
-                }));
-            }
+    if let Ok(text) = client.post_sql(&cols_sql, |_| {}).await
+        && let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0)
+    {
+        for row in parsed.rows {
+            let name = row.first().and_then(|x| x.as_str()).unwrap_or("unknown");
+            let col_type = row.get(1).and_then(|x| x.as_str()).unwrap_or("String");
+            let comment = row.get(2).and_then(|x| x.as_str()).unwrap_or("");
+            let is_nullable = col_type.starts_with("Nullable(");
+            columns.push(json!({
+                "name": name,
+                "dataType": col_type,
+                "isNullable": is_nullable,
+                "comment": comment
+            }));
         }
     }
 

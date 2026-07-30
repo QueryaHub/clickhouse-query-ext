@@ -19,7 +19,9 @@ pub async fn dispatch(method: &str, params: Option<Value>) -> Result<Value, Driv
         "sdui.contextActions" => schema::handle_context_actions(params).await,
         "db.getCapabilities" => schema::handle_get_capabilities(params).await,
         "db.getServerStats" => schema::handle_get_server_stats(params).await,
-        "db.getObjectMetadata" | "db.getObjectDDL" => schema::handle_get_object_metadata(params).await,
+        "db.getObjectMetadata" | "db.getObjectDDL" => {
+            schema::handle_get_object_metadata(params).await
+        }
         _ => Err(DriverError::Rpc {
             code: -32601,
             message: format!("Method not found: {}", method),

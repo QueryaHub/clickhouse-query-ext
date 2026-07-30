@@ -14,10 +14,13 @@ pub struct ConnectParams {
     pub connection_string: Option<String>,
     pub host: Option<String>,
     pub port: Option<u16>,
+    #[serde(alias = "username")]
     pub user: Option<String>,
     pub database: Option<String>,
     #[serde(alias = "safe_mode", alias = "safeMode")]
     pub readonly: Option<bool>,
+    #[serde(alias = "sslMode")]
+    pub ssl_mode: Option<String>,
 }
 
 #[derive(Debug)]
@@ -44,8 +47,17 @@ impl ClickHouseClient {
             } else {
                 let parsed = Url::parse(&cs)?;
                 let host = parsed.host_str().unwrap_or("localhost");
-                let port = parsed.port().unwrap_or(8123);
                 let scheme = parsed.scheme();
+                let port_str = match parsed.port() {
+                    Some(p) => format!(":{}", p),
+                    None => {
+                        if scheme == "http" {
+                            ":8123".to_string()
+                        } else {
+                            String::new()
+                        }
+                    }
+                };
                 let user = if !parsed.username().is_empty() {
                     parsed.username().to_string()
                 } else {
@@ -58,17 +70,24 @@ impl ClickHouseClient {
                     params.database.unwrap_or_else(|| "default".to_string())
                 };
                 let readonly = params.readonly.unwrap_or(false);
-                let base = format!("{}://{}:{}", scheme, host, port);
+                let base = format!("{}://{}{}", scheme, host, port_str);
                 (base, user, database, readonly)
             }
         } else {
             let host = params.host.unwrap_or_else(|| "localhost".to_string());
-            let port = params.port.unwrap_or(8123);
+            let scheme = match params.ssl_mode.as_deref() {
+                Some("prefer") | Some("require") => "https",
+                _ => "http",
+            };
+            let mut port = params.port.unwrap_or(8123);
+            if scheme == "https" && port == 8123 {
+                port = 8443;
+            }
             let user = params.user.unwrap_or_else(|| "default".to_string());
             let database = params.database.unwrap_or_else(|| "default".to_string());
             let readonly = params.readonly.unwrap_or(false);
             (
-                format!("http://{}:{}", host, port),
+                format!("{}://{}:{}", scheme, host, port),
                 user,
                 database,
                 readonly,
