@@ -64,10 +64,28 @@ mkdir -p "${STAGING_DIR}/bin" "${STAGING_DIR}/assets"
 cp manifest.json "${STAGING_DIR}/"
 cp -r assets/* "${STAGING_DIR}/assets/"
 
+# For Windows targets, adjust manifest.json main entry point to include .exe extension
+if [[ "$TARGET" == *"windows"* ]] || [[ "$DEST_BIN_NAME" == *".exe" ]]; then
+  python3 -c "
+import json, sys
+manifest_path = sys.argv[1]
+dest_bin = sys.argv[2]
+with open(manifest_path, 'r', encoding='utf-8') as f:
+    manifest = json.load(f)
+manifest['main'] = f'bin/{dest_bin}'
+with open(manifest_path, 'w', encoding='utf-8') as f:
+    json.dump(manifest, f, indent=2, ensure_ascii=False)
+" "${STAGING_DIR}/manifest.json" "${DEST_BIN_NAME}"
+fi
+
 # 2. Copy binary into bin/ under both the manifest main entry and original name
 cp "${BIN_PATH}" "${STAGING_DIR}/bin/${DEST_BIN_NAME}"
 if [ "${DEST_BIN_NAME}" != "${BIN_NAME}" ] && [ ! -f "${STAGING_DIR}/bin/${BIN_NAME}" ]; then
   cp "${BIN_PATH}" "${STAGING_DIR}/bin/${BIN_NAME}"
+fi
+# On Windows packages, also provide the extensionless binary name for backward compatibility
+if [[ "$DEST_BIN_NAME" == *".exe" ]] && [ ! -f "${STAGING_DIR}/bin/clickhouse_rpc_server" ]; then
+  cp "${BIN_PATH}" "${STAGING_DIR}/bin/clickhouse_rpc_server" 2>/dev/null || true
 fi
 chmod +x "${STAGING_DIR}/bin/${DEST_BIN_NAME}"
 if [ -f "${STAGING_DIR}/bin/${BIN_NAME}" ]; then
