@@ -92,9 +92,15 @@ fn strip_sql_comments_and_trim(sql: &str) -> String {
                 res.push(' ');
             }
         } else if in_string {
-            res.push(c);
-            if c == string_quote {
-                in_string = false;
+            if c == '\\' {
+                chars.next();
+            } else if c == string_quote {
+                if chars.peek() == Some(&string_quote) {
+                    chars.next();
+                } else {
+                    in_string = false;
+                    res.push('\'');
+                }
             }
         } else if c == '-' && chars.peek() == Some(&'-') {
             chars.next();
@@ -102,10 +108,10 @@ fn strip_sql_comments_and_trim(sql: &str) -> String {
         } else if c == '/' && chars.peek() == Some(&'*') {
             chars.next();
             in_multi_comment = true;
-        } else if c == '\'' || c == '`' || c == '"' {
+        } else if c == '\'' || c == '"' {
             in_string = true;
             string_quote = c;
-            res.push(c);
+            res.push('\'');
         } else {
             res.push(c);
         }
@@ -113,19 +119,87 @@ fn strip_sql_comments_and_trim(sql: &str) -> String {
     res.trim().to_uppercase()
 }
 
-/// Pre-checks AST/SQL syntax in Safe Mode (`readonly = true`) before network roundtrip.
-fn enforce_safe_mode_precheck(sql: &str) -> Result<(), DriverError> {
-    let upper = strip_sql_comments_and_trim(sql);
+/// Splits SQL text into individual statements separated by semicolon (`;`),
+/// taking care not to split inside single/double quotes, backticks, or comments.
+pub fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut in_single_comment = false;
+    let mut in_multi_comment = false;
+    let mut in_string = false;
+    let mut string_quote = ' ';
+
+    while let Some(c) = chars.next() {
+        if in_single_comment {
+            current.push(c);
+            if c == '\n' {
+                in_single_comment = false;
+            }
+        } else if in_multi_comment {
+            current.push(c);
+            if c == '*' && chars.peek() == Some(&'/') {
+                current.push(chars.next().unwrap());
+                in_multi_comment = false;
+            }
+        } else if in_string {
+            current.push(c);
+            if c == '\\' {
+                if let Some(next_c) = chars.next() {
+                    current.push(next_c);
+                }
+            } else if c == string_quote {
+                if chars.peek() == Some(&string_quote) {
+                    current.push(chars.next().unwrap());
+                } else {
+                    in_string = false;
+                }
+            }
+        } else if c == '-' && chars.peek() == Some(&'-') {
+            current.push(c);
+            current.push(chars.next().unwrap());
+            in_single_comment = true;
+        } else if c == '/' && chars.peek() == Some(&'*') {
+            current.push(c);
+            current.push(chars.next().unwrap());
+            in_multi_comment = true;
+        } else if c == '\'' || c == '`' || c == '"' {
+            in_string = true;
+            string_quote = c;
+            current.push(c);
+        } else if c == ';' {
+            let trimmed = current.trim();
+            if !trimmed.is_empty() {
+                statements.push(trimmed.to_string());
+            }
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+
+    let trimmed = current.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_string());
+    }
+
+    statements
+}
+
+/// Checks an individual SQL statement for dangerous/destructive operations in Safe Mode.
+fn check_single_statement_for_safe_mode(statement_sql: &str) -> Result<(), DriverError> {
+    let upper = strip_sql_comments_and_trim(statement_sql);
     let tokens: Vec<&str> = upper.split_whitespace().collect();
     if tokens.is_empty() {
         return Ok(());
     }
 
-    let first = tokens[0];
-    let second = tokens.get(1).copied().unwrap_or("");
-    let third = tokens.get(2).copied().unwrap_or("");
+    let first = tokens[0].trim_start_matches('(');
+    let second = tokens.get(1).copied().unwrap_or("").trim_start_matches('(');
+    let third = tokens.get(2).copied().unwrap_or("").trim_start_matches('(');
 
     let is_dangerous = match first {
+        "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "EXISTS" | "CHECK" | "WITH" => false,
         "DROP" => {
             second == "DATABASE" || second == "TABLE" || second == "VIEW" || second == "DICTIONARY"
         }
@@ -133,18 +207,24 @@ fn enforce_safe_mode_precheck(sql: &str) -> Result<(), DriverError> {
         "ALTER" => {
             second == "TABLE"
                 && tokens.iter().any(|&t| {
-                    t == "DROP"
-                        || t == "DELETE"
-                        || t == "UPDATE"
-                        || t == "MODIFY"
-                        || t == "REPLACE"
-                        || t == "CLEAR"
-                        || t == "FREEZE"
-                        || t == "ATTACH"
-                        || t == "DETACH"
+                    let clean = t.trim_matches(|c| c == '(' || c == ')');
+                    clean == "DROP"
+                        || clean == "DELETE"
+                        || clean == "UPDATE"
+                        || clean == "MODIFY"
+                        || clean == "REPLACE"
+                        || clean == "CLEAR"
+                        || clean == "FREEZE"
+                        || clean == "ATTACH"
+                        || clean == "DETACH"
                 })
         }
-        "INSERT" => second == "INTO" || third == "INTO",
+        "INSERT" => {
+            second == "INTO"
+                || third == "INTO"
+                || tokens.contains(&"VALUES")
+                || tokens.contains(&"SELECT")
+        }
         "DELETE" => second == "FROM" || third == "FROM",
         "UPDATE" => true,
         "CREATE" => {
@@ -153,10 +233,14 @@ fn enforce_safe_mode_precheck(sql: &str) -> Result<(), DriverError> {
         "RENAME" => second == "TABLE" || second == "DATABASE",
         "ATTACH" | "DETACH" => second == "TABLE" || second == "PARTITION",
         _ => {
-            upper.contains("DROP DATABASE")
-                || upper.contains("TRUNCATE TABLE")
-                || upper.contains("DROP TABLE")
-                || (upper.contains("ALTER TABLE") && upper.contains("DROP"))
+            tokens.contains(&"DROP")
+                || tokens.contains(&"TRUNCATE")
+                || tokens.contains(&"DELETE")
+                || tokens.contains(&"UPDATE")
+                || (tokens.contains(&"ALTER") && tokens.contains(&"TABLE"))
+                || (tokens.contains(&"INSERT") && tokens.contains(&"INTO"))
+                || (tokens.contains(&"CREATE")
+                    && (tokens.contains(&"TABLE") || tokens.contains(&"DATABASE")))
         }
     };
 
@@ -164,6 +248,19 @@ fn enforce_safe_mode_precheck(sql: &str) -> Result<(), DriverError> {
         return Err(DriverError::SafeModeViolation(
             "Operation blocked by Safe Mode: write or destructive queries are forbidden in analytical read-only mode".to_string(),
         ));
+    }
+    Ok(())
+}
+
+/// Pre-checks AST/SQL syntax in Safe Mode (`readonly = true`) before network roundtrip,
+/// evaluating all statements in multi-statement queries.
+fn enforce_safe_mode_precheck(sql: &str) -> Result<(), DriverError> {
+    let statements = split_sql_statements(sql);
+    if statements.is_empty() {
+        return check_single_statement_for_safe_mode(sql);
+    }
+    for stmt in &statements {
+        check_single_statement_for_safe_mode(stmt)?;
     }
     Ok(())
 }
@@ -523,6 +620,77 @@ mod tests {
         assert!(enforce_safe_mode_precheck("INSERT INTO events VALUES (1, 'test')").is_err());
         assert!(enforce_safe_mode_precheck("DELETE FROM events WHERE id = 1").is_err());
         assert!(enforce_safe_mode_precheck("CREATE TABLE new_tbl (id Int32)").is_err());
+    }
+
+    #[test]
+    fn test_split_sql_statements() {
+        assert_eq!(
+            split_sql_statements("SELECT 1; SELECT 2"),
+            vec!["SELECT 1", "SELECT 2"]
+        );
+        assert_eq!(
+            split_sql_statements("SELECT 'hello; world'; SELECT 2;"),
+            vec!["SELECT 'hello; world'", "SELECT 2"]
+        );
+        assert_eq!(
+            split_sql_statements("SELECT `col;name` FROM t; SELECT 3"),
+            vec!["SELECT `col;name` FROM t", "SELECT 3"]
+        );
+        assert_eq!(
+            split_sql_statements("SELECT 1 -- ; comment\n; SELECT 2"),
+            vec!["SELECT 1 -- ; comment", "SELECT 2"]
+        );
+        assert_eq!(
+            split_sql_statements("SELECT 1 /* ; block comment */ ; SELECT 2"),
+            vec!["SELECT 1 /* ; block comment */", "SELECT 2"]
+        );
+        assert_eq!(split_sql_statements(";; ;"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_safe_mode_multi_statement_bypass_prevention() {
+        // Multi-statement bypass attempts from Issue #54
+        assert!(
+            enforce_safe_mode_precheck(
+                "SELECT 1; INSERT INTO telemetry VALUES ('compromised', now());"
+            )
+            .is_err()
+        );
+        assert!(enforce_safe_mode_precheck("SELECT 1; DROP TABLE events;").is_err());
+        assert!(enforce_safe_mode_precheck("SELECT 1; TRUNCATE TABLE events;").is_err());
+        assert!(
+            enforce_safe_mode_precheck("SELECT 1; ALTER TABLE events DROP COLUMN user_id;")
+                .is_err()
+        );
+        assert!(enforce_safe_mode_precheck("SELECT 1; DELETE FROM events WHERE 1=1;").is_err());
+        assert!(enforce_safe_mode_precheck("SELECT 1; UPDATE events SET id = 2;").is_err());
+        assert!(enforce_safe_mode_precheck("SELECT 1; CREATE TABLE new_tbl (id Int32);").is_err());
+
+        // Benign multi-statement queries
+        assert!(enforce_safe_mode_precheck("SELECT 1; SELECT 2; SHOW TABLES;").is_ok());
+        assert!(enforce_safe_mode_precheck("SELECT ';'; SELECT 'DROP TABLE in string';").is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_handle_query_blocked_by_safe_mode_multi_statement() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 223,
+            connection_string: Some("mock://localhost:8123/default?readonly=1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let query_params = json!({
+            "connectionId": 223,
+            "sql": "SELECT 1; INSERT INTO telemetry VALUES ('compromised', now());"
+        });
+
+        let err = handle_query(Some(query_params)).await.unwrap_err();
+        assert!(matches!(err, DriverError::SafeModeViolation(_)));
+
+        ConnectionPool::global().remove(223);
     }
 
     #[tokio::test]
