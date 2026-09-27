@@ -2,4 +2,5 @@
 pub mod logger;
 pub mod recovery;
 pub mod secret_guard;
+pub mod sql_escape;
 pub mod test_lock;

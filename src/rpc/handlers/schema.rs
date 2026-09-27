@@ -131,7 +131,7 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
             let filter_view = group_type == "views";
             let sql = format!(
                 "SELECT t.name AS name, t.engine AS engine, t.total_rows AS total_rows, formatReadableSize(t.total_bytes) AS size_readable, t.comment AS comment, multiIf(t.engine LIKE '%View%', 'view', t.engine LIKE '%Dictionary%', 'dictionary', 'table') AS object_type FROM system.tables t WHERE database = '{}' ORDER BY name FORMAT JSONCompactEachRowWithNamesAndTypes",
-                db_name
+                crate::utils::sql_escape::escape_sql_string_literal(db_name)
             );
 
             let text = if is_mock {
@@ -149,7 +149,7 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
         } else if group_type == "dictionaries" {
             let sql = format!(
                 "SELECT name, status, type, element_count, load_factor, formatReadableSize(bytes_allocated) AS size FROM system.dictionaries WHERE database = '{}' FORMAT JSONCompactEachRowWithNamesAndTypes",
-                db_name
+                crate::utils::sql_escape::escape_sql_string_literal(db_name)
             );
 
             let text = if is_mock {
@@ -172,7 +172,8 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
         let table_name = parts[2];
         let sql = format!(
             "SELECT name, type, comment FROM system.columns WHERE database = '{}' AND table = '{}' ORDER BY position FORMAT JSONCompactEachRowWithNamesAndTypes",
-            db_name, table_name
+            crate::utils::sql_escape::escape_sql_string_literal(db_name),
+            crate::utils::sql_escape::escape_sql_string_literal(table_name)
         );
 
         let text = if is_mock {
@@ -195,7 +196,8 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
         let table_name = parts[2];
         let sql = format!(
             "SELECT partition, sum(rows) AS total_rows, formatReadableSize(sum(data_compressed_bytes)) AS compressed_size, count() AS parts_count FROM system.parts WHERE database = '{}' AND table = '{}' AND active = 1 GROUP BY partition ORDER BY partition DESC FORMAT JSONCompactEachRowWithNamesAndTypes",
-            db_name, table_name
+            crate::utils::sql_escape::escape_sql_string_literal(db_name),
+            crate::utils::sql_escape::escape_sql_string_literal(table_name)
         );
 
         let text = if is_mock {
@@ -418,8 +420,9 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
     }
 
     let ddl_sql = format!(
-        "SHOW CREATE TABLE `{}`.`{}` FORMAT JSONCompactEachRow",
-        db_name, tbl_name
+        "SHOW CREATE TABLE {}.{} FORMAT JSONCompactEachRow",
+        crate::utils::sql_escape::quote_identifier(db_name),
+        crate::utils::sql_escape::quote_identifier(tbl_name)
     );
     let mut ddl_str = String::new();
     if let Ok(text) = client.post_sql(&ddl_sql, |_| {}).await
@@ -432,7 +435,8 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
 
     let cols_sql = format!(
         "SELECT name, type, comment FROM system.columns WHERE database = '{}' AND table = '{}' ORDER BY position FORMAT JSONCompactEachRowWithNamesAndTypes",
-        db_name, tbl_name
+        crate::utils::sql_escape::escape_sql_string_literal(db_name),
+        crate::utils::sql_escape::escape_sql_string_literal(tbl_name)
     );
     let mut columns = Vec::new();
     if let Ok(text) = client.post_sql(&cols_sql, |_| {}).await
