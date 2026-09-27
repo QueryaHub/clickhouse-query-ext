@@ -51,6 +51,26 @@ fn generate_query_id(connection_id: u64) -> String {
     format!("querya-job-{}-{}-{}", connection_id, now, seq)
 }
 
+/// Validates that an identifier token (queryId or mutationId) contains only safe characters.
+pub fn validate_query_or_mutation_id(id: &str, field_name: &str) -> Result<(), DriverError> {
+    if id.is_empty() || id.len() > 256 {
+        return Err(DriverError::Client(format!(
+            "Invalid {} length: must be between 1 and 256 characters",
+            field_name
+        )));
+    }
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err(DriverError::Client(format!(
+            "Invalid {} format: '{}' contains disallowed characters (allowed: [a-zA-Z0-9_.-])",
+            field_name, id
+        )));
+    }
+    Ok(())
+}
+
 fn strip_sql_comments_and_trim(sql: &str) -> String {
     let mut res = String::new();
     let mut chars = sql.chars().peekable();
@@ -191,7 +211,10 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
     };
 
     let actual_query_id = match &query_params.query_id {
-        Some(qid) if !qid.is_empty() => qid.clone(),
+        Some(qid) if !qid.is_empty() => {
+            validate_query_or_mutation_id(qid, "queryId")?;
+            qid.clone()
+        }
         _ => generate_query_id(query_params.connection_id),
     };
 
@@ -349,6 +372,8 @@ pub async fn handle_cancel(params: Option<Value>) -> Result<Value, DriverError> 
         .get(cancel_params.connection_id)
         .ok_or_else(|| DriverError::ConnectionNotFound(cancel_params.connection_id))?;
 
+    validate_query_or_mutation_id(&cancel_params.query_id, "queryId")?;
+
     info!(
         "Cancelling queryId={} on connectionId={}",
         cancel_params.query_id, cancel_params.connection_id
@@ -358,6 +383,8 @@ pub async fn handle_cancel(params: Option<Value>) -> Result<Value, DriverError> 
         return Ok(json!({ "ok": true }));
     }
 
+    let escaped_query_id =
+        crate::utils::sql_escape::escape_sql_string_literal(&cancel_params.query_id);
     let sync_kw = if cancel_params.sync { "SYNC" } else { "ASYNC" };
     let mut url = Url::parse(&client.base_url)?;
     url.query_pairs_mut()
@@ -366,7 +393,7 @@ pub async fn handle_cancel(params: Option<Value>) -> Result<Value, DriverError> 
             "query",
             &format!(
                 "KILL QUERY WHERE query_id = '{}' {}",
-                cancel_params.query_id, sync_kw
+                escaped_query_id, sync_kw
             ),
         );
 
@@ -413,6 +440,8 @@ pub async fn handle_kill_mutation(params: Option<Value>) -> Result<Value, Driver
         .get(kill_params.connection_id)
         .ok_or_else(|| DriverError::ConnectionNotFound(kill_params.connection_id))?;
 
+    validate_query_or_mutation_id(&kill_params.mutation_id, "mutationId")?;
+
     info!(
         "Killing mutationId={} on connectionId={}",
         kill_params.mutation_id, kill_params.connection_id
@@ -422,6 +451,8 @@ pub async fn handle_kill_mutation(params: Option<Value>) -> Result<Value, Driver
         return Ok(json!({ "ok": true }));
     }
 
+    let escaped_mutation_id =
+        crate::utils::sql_escape::escape_sql_string_literal(&kill_params.mutation_id);
     let sync_kw = if kill_params.sync { "SYNC" } else { "ASYNC" };
     let mut url = Url::parse(&client.base_url)?;
     url.query_pairs_mut()
@@ -430,7 +461,7 @@ pub async fn handle_kill_mutation(params: Option<Value>) -> Result<Value, Driver
             "query",
             &format!(
                 "KILL MUTATION WHERE mutation_id = '{}' {}",
-                kill_params.mutation_id, sync_kw
+                escaped_mutation_id, sync_kw
             ),
         );
 
@@ -779,5 +810,87 @@ mod tests {
         );
 
         ConnectionPool::global().remove(778);
+    }
+
+    #[test]
+    fn test_validate_query_or_mutation_id() {
+        assert!(validate_query_or_mutation_id("q123", "queryId").is_ok());
+        assert!(validate_query_or_mutation_id("mutation_123.txt", "mutationId").is_ok());
+        assert!(validate_query_or_mutation_id("querya-job-1-12345-67", "queryId").is_ok());
+
+        // Empty
+        assert!(validate_query_or_mutation_id("", "queryId").is_err());
+        // Too long (>256)
+        assert!(validate_query_or_mutation_id(&"a".repeat(257), "queryId").is_err());
+        // Disallowed chars (SQL injection vectors)
+        assert!(validate_query_or_mutation_id("' OR 1=1 --", "queryId").is_err());
+        assert!(validate_query_or_mutation_id("id; DROP TABLE x;", "queryId").is_err());
+        assert!(validate_query_or_mutation_id("id`injection", "mutationId").is_err());
+        assert!(validate_query_or_mutation_id("id with spaces", "queryId").is_err());
+        assert!(validate_query_or_mutation_id("id\nnewline", "queryId").is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_cancel_rejects_malicious_query_id() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 881,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let cancel_params = json!({
+            "connectionId": 881,
+            "queryId": "' OR 1=1 --"
+        });
+        let err = handle_cancel(Some(cancel_params)).await.unwrap_err();
+        assert!(matches!(err, DriverError::Client(_)));
+
+        ConnectionPool::global().remove(881);
+    }
+
+    #[tokio::test]
+    async fn test_handle_kill_mutation_rejects_malicious_mutation_id() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 882,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let kill_params = json!({
+            "connectionId": 882,
+            "mutationId": "' OR 1=1 --"
+        });
+        let err = handle_kill_mutation(Some(kill_params)).await.unwrap_err();
+        assert!(matches!(err, DriverError::Client(_)));
+
+        ConnectionPool::global().remove(882);
+    }
+
+    #[tokio::test]
+    async fn test_handle_query_rejects_malicious_custom_query_id() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 883,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let query_params = json!({
+            "connectionId": 883,
+            "sql": "SELECT 1",
+            "queryId": "malicious'query"
+        });
+        let err = handle_query(Some(query_params)).await.unwrap_err();
+        assert!(matches!(err, DriverError::Client(_)));
+
+        ConnectionPool::global().remove(883);
     }
 }
