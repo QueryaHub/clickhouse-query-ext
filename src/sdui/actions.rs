@@ -1,4 +1,5 @@
 use crate::error::DriverError;
+use crate::utils::sql_escape::{escape_sql_string_literal, quote_identifier};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -84,6 +85,10 @@ pub fn get_context_actions_for_node(
             }
             let db_name = parts[1];
             let table_name = parts[2];
+            let q_db = quote_identifier(db_name);
+            let q_tbl = quote_identifier(table_name);
+            let esc_db = escape_sql_string_literal(db_name);
+            let esc_tbl = escape_sql_string_literal(table_name);
 
             Ok(vec![
                 SduiContextAction::new(
@@ -93,7 +98,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT * FROM {}.{} LIMIT 100",
-                        db_name, table_name
+                        q_db, q_tbl
                     )),
                     false,
                     false,
@@ -103,7 +108,7 @@ pub fn get_context_actions_for_node(
                     "📜 Show DDL (SHOW CREATE TABLE)",
                     Some("code"),
                     "query",
-                    Some(format!("SHOW CREATE TABLE {}.{}", db_name, table_name)),
+                    Some(format!("SHOW CREATE TABLE {}.{}", q_db, q_tbl)),
                     false,
                     false,
                 ),
@@ -121,7 +126,7 @@ pub fn get_context_actions_for_node(
                     "🔨 Optimize Table (FINAL)",
                     Some("tool"),
                     "execute",
-                    Some(format!("OPTIMIZE TABLE {}.{} FINAL", db_name, table_name)),
+                    Some(format!("OPTIMIZE TABLE {}.{} FINAL", q_db, q_tbl)),
                     true,
                     false,
                 ),
@@ -132,7 +137,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "OPTIMIZE TABLE {}.{} DEDUPLICATE",
-                        db_name, table_name
+                        q_db, q_tbl
                     )),
                     true,
                     false,
@@ -144,7 +149,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT mutation_id, command, create_time, parts_to_do, is_done FROM system.mutations WHERE database = '{}' AND table = '{}' AND is_done = 0",
-                        db_name, table_name
+                        esc_db, esc_tbl
                     )),
                     false,
                     false,
@@ -156,7 +161,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT query_id, user, query, elapsed, formatReadableSize(memory_usage) AS mem FROM system.processes WHERE current_database = '{}' AND query LIKE '%{}%' AND query NOT LIKE '%system.processes%'",
-                        db_name, table_name
+                        esc_db, esc_tbl
                     )),
                     false,
                     false,
@@ -168,7 +173,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "KILL MUTATION WHERE database = '{}' AND table = '{}'",
-                        db_name, table_name
+                        esc_db, esc_tbl
                     )),
                     true,
                     true,
@@ -184,6 +189,8 @@ pub fn get_context_actions_for_node(
             }
             let db_name = parts[1];
             let view_name = parts[2];
+            let q_db = quote_identifier(db_name);
+            let q_view = quote_identifier(view_name);
 
             Ok(vec![
                 SduiContextAction::new(
@@ -191,7 +198,7 @@ pub fn get_context_actions_for_node(
                     "⚡ Top 100 Rows",
                     Some("eye"),
                     "query",
-                    Some(format!("SELECT * FROM {}.{} LIMIT 100", db_name, view_name)),
+                    Some(format!("SELECT * FROM {}.{} LIMIT 100", q_db, q_view)),
                     false,
                     false,
                 ),
@@ -200,7 +207,7 @@ pub fn get_context_actions_for_node(
                     "📜 Show DDL (SHOW CREATE TABLE)",
                     Some("code"),
                     "query",
-                    Some(format!("SHOW CREATE TABLE {}.{}", db_name, view_name)),
+                    Some(format!("SHOW CREATE TABLE {}.{}", q_db, q_view)),
                     false,
                     false,
                 ),
@@ -216,6 +223,9 @@ pub fn get_context_actions_for_node(
             let db_name = parts[1];
             let table_name = parts[2];
             let partition = parts[3];
+            let q_db = quote_identifier(db_name);
+            let q_tbl = quote_identifier(table_name);
+            let esc_part = escape_sql_string_literal(partition);
 
             Ok(vec![
                 SduiContextAction::new(
@@ -225,7 +235,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "ALTER TABLE {}.{} DROP PARTITION '{}'",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     true,
                     true,
@@ -237,7 +247,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "ALTER TABLE {}.{} FREEZE PARTITION '{}'",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     false,
                     false,
@@ -249,7 +259,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "ALTER TABLE {}.{} DETACH PARTITION '{}'",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     true,
                     true,
@@ -261,7 +271,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "ALTER TABLE {}.{} ATTACH PARTITION '{}'",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     false,
                     false,
@@ -273,7 +283,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "OPTIMIZE TABLE {}.{} PARTITION '{}' FINAL",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     true,
                     false,
@@ -285,7 +295,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "OPTIMIZE TABLE {}.{} PARTITION '{}' DEDUPLICATE",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     true,
                     false,
@@ -300,6 +310,7 @@ pub fn get_context_actions_for_node(
                 )));
             }
             let db_name = parts[1];
+            let esc_db = escape_sql_string_literal(db_name);
 
             Ok(vec![
                 SduiContextAction::new(
@@ -309,7 +320,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT mutation_id, table, command, create_time, parts_to_do FROM system.mutations WHERE database = '{}' AND is_done = 0",
-                        db_name
+                        esc_db
                     )),
                     false,
                     false,
@@ -321,7 +332,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT query_id, user, query, elapsed, formatReadableSize(memory_usage) AS mem FROM system.processes WHERE current_database = '{}'",
-                        db_name
+                        esc_db
                     )),
                     false,
                     false,
@@ -331,7 +342,7 @@ pub fn get_context_actions_for_node(
                     "🛑 Kill Mutations in Database",
                     Some("x-circle"),
                     "execute",
-                    Some(format!("KILL MUTATION WHERE database = '{}'", db_name)),
+                    Some(format!("KILL MUTATION WHERE database = '{}'", esc_db)),
                     true,
                     true,
                 ),
@@ -340,7 +351,7 @@ pub fn get_context_actions_for_node(
                     "🛑 Kill Queries in Database",
                     Some("x-circle"),
                     "execute",
-                    Some(format!("KILL QUERY WHERE current_database = '{}' ASYNC", db_name)),
+                    Some(format!("KILL QUERY WHERE current_database = '{}' ASYNC", esc_db)),
                     true,
                     true,
                 ),
@@ -356,6 +367,9 @@ pub fn get_context_actions_for_node(
             let db_name = parts[1];
             let table_name = parts[2];
             let col_name = parts[3];
+            let q_db = quote_identifier(db_name);
+            let q_tbl = quote_identifier(table_name);
+            let q_col = quote_identifier(col_name);
 
             Ok(vec![
                 SduiContextAction::new(
@@ -365,7 +379,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT count() as total_rows, countIf(isNotNull({0})) as not_nulls, uniqExact({0}) as unique_exact, min({0}) as min_val, max({0}) as max_val, topK(5)({0}) as top_5_values FROM {1}.{2}",
-                        col_name, db_name, table_name
+                        q_col, q_db, q_tbl
                     )),
                     false,
                     false,
@@ -377,7 +391,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT {0}, count() as cnt FROM {1}.{2} GROUP BY {0} ORDER BY cnt DESC LIMIT 10",
-                        col_name, db_name, table_name
+                        q_col, q_db, q_tbl
                     )),
                     false,
                     false,
@@ -399,14 +413,14 @@ mod tests {
         assert_eq!(actions[0].id, "table.top_100");
         assert_eq!(
             actions[0].sql.as_deref(),
-            Some("SELECT * FROM analytics.events LIMIT 100")
+            Some("SELECT * FROM `analytics`.`events` LIMIT 100")
         );
         assert!(!actions[0].requires_confirmation);
 
         assert_eq!(actions[3].id, "table.optimize_final");
         assert_eq!(
             actions[3].sql.as_deref(),
-            Some("OPTIMIZE TABLE analytics.events FINAL")
+            Some("OPTIMIZE TABLE `analytics`.`events` FINAL")
         );
         assert!(actions[3].requires_confirmation);
 
@@ -422,7 +436,7 @@ mod tests {
         assert_eq!(actions[0].id, "partition.drop");
         assert_eq!(
             actions[0].sql.as_deref(),
-            Some("ALTER TABLE analytics.events DROP PARTITION '202607'")
+            Some("ALTER TABLE `analytics`.`events` DROP PARTITION '202607'")
         );
         assert!(actions[0].requires_confirmation);
         assert!(actions[0].danger);
@@ -430,7 +444,7 @@ mod tests {
         assert_eq!(actions[1].id, "partition.freeze");
         assert_eq!(
             actions[1].sql.as_deref(),
-            Some("ALTER TABLE analytics.events FREEZE PARTITION '202607'")
+            Some("ALTER TABLE `analytics`.`events` FREEZE PARTITION '202607'")
         );
         assert!(!actions[1].requires_confirmation);
         assert!(!actions[1].danger);
@@ -438,7 +452,7 @@ mod tests {
         assert_eq!(actions[2].id, "partition.detach");
         assert_eq!(
             actions[2].sql.as_deref(),
-            Some("ALTER TABLE analytics.events DETACH PARTITION '202607'")
+            Some("ALTER TABLE `analytics`.`events` DETACH PARTITION '202607'")
         );
         assert!(actions[2].requires_confirmation);
         assert!(actions[2].danger);
@@ -446,7 +460,7 @@ mod tests {
         assert_eq!(actions[3].id, "partition.attach");
         assert_eq!(
             actions[3].sql.as_deref(),
-            Some("ALTER TABLE analytics.events ATTACH PARTITION '202607'")
+            Some("ALTER TABLE `analytics`.`events` ATTACH PARTITION '202607'")
         );
         assert!(!actions[3].requires_confirmation);
         assert!(!actions[3].danger);
@@ -454,14 +468,14 @@ mod tests {
         assert_eq!(actions[4].id, "partition.optimize_final");
         assert_eq!(
             actions[4].sql.as_deref(),
-            Some("OPTIMIZE TABLE analytics.events PARTITION '202607' FINAL")
+            Some("OPTIMIZE TABLE `analytics`.`events` PARTITION '202607' FINAL")
         );
         assert!(actions[4].requires_confirmation);
 
         assert_eq!(actions[5].id, "partition.deduplicate");
         assert_eq!(
             actions[5].sql.as_deref(),
-            Some("OPTIMIZE TABLE analytics.events PARTITION '202607' DEDUPLICATE")
+            Some("OPTIMIZE TABLE `analytics`.`events` PARTITION '202607' DEDUPLICATE")
         );
         assert!(actions[5].requires_confirmation);
     }
@@ -479,6 +493,10 @@ mod tests {
             get_context_actions_for_node("view", "view.analytics.mv_summary").unwrap();
         assert_eq!(view_actions.len(), 2);
         assert_eq!(view_actions[0].id, "view.top_100");
+        assert_eq!(
+            view_actions[0].sql.as_deref(),
+            Some("SELECT * FROM `analytics`.`mv_summary` LIMIT 100")
+        );
     }
 
     #[test]
@@ -500,7 +518,7 @@ mod tests {
         assert_eq!(
             actions[0].sql.as_deref(),
             Some(
-                "SELECT count() as total_rows, countIf(isNotNull(user_id)) as not_nulls, uniqExact(user_id) as unique_exact, min(user_id) as min_val, max(user_id) as max_val, topK(5)(user_id) as top_5_values FROM analytics.events"
+                "SELECT count() as total_rows, countIf(isNotNull(`user_id`)) as not_nulls, uniqExact(`user_id`) as unique_exact, min(`user_id`) as min_val, max(`user_id`) as max_val, topK(5)(`user_id`) as top_5_values FROM `analytics`.`events`"
             )
         );
         assert_eq!(actions[0].action_type, "query");
@@ -509,8 +527,30 @@ mod tests {
         assert_eq!(
             actions[1].sql.as_deref(),
             Some(
-                "SELECT user_id, count() as cnt FROM analytics.events GROUP BY user_id ORDER BY cnt DESC LIMIT 10"
+                "SELECT `user_id`, count() as cnt FROM `analytics`.`events` GROUP BY `user_id` ORDER BY cnt DESC LIMIT 10"
             )
+        );
+    }
+
+    #[test]
+    fn test_context_actions_sql_injection_protection() {
+        let malicious_part = "part.db`test.tbl'test.2026'; DROP TABLE secret; --";
+        let actions = get_context_actions_for_node("partition", malicious_part).unwrap();
+        assert_eq!(
+            actions[0].sql.as_deref(),
+            Some(
+                "ALTER TABLE `db``test`.`tbl'test` DROP PARTITION '2026\'\'; DROP TABLE secret; --'"
+            )
+        );
+
+        let malicious_col = "col.db.tbl.user_id`; DROP TABLE users; --";
+        let col_actions = get_context_actions_for_node("column", malicious_col).unwrap();
+        assert!(
+            col_actions[1]
+                .sql
+                .as_ref()
+                .unwrap()
+                .contains("`user_id``; DROP TABLE users; --`")
         );
     }
 
