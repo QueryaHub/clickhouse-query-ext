@@ -1,5 +1,6 @@
 use crate::error::DriverError;
 use crate::mapper::row_compact::parse_compact_output;
+use crate::utils::node_id::encode_id_segment;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -50,7 +51,7 @@ pub fn build_root_databases_nodes(
             let comment = row.get(2).and_then(|v| v.as_str()).unwrap_or("");
 
             nodes.push(SduiTreeNode::new(
-                format!("db.{}", name),
+                format!("db.{}", encode_id_segment(name)),
                 name,
                 "database",
                 Some("database"),
@@ -86,9 +87,10 @@ pub fn build_root_databases_nodes(
 
 /// Builds database child groups (`Tables`, `Views`, `Dictionaries`) when a `database` node is expanded.
 pub fn build_database_groups(db_name: &str) -> Vec<SduiTreeNode> {
+    let enc_db = encode_id_segment(db_name);
     vec![
         SduiTreeNode::new(
-            format!("group.{}.tables", db_name),
+            format!("group.{}.tables", enc_db),
             "Таблицы (Tables)",
             "group",
             Some("folder-table"),
@@ -96,7 +98,7 @@ pub fn build_database_groups(db_name: &str) -> Vec<SduiTreeNode> {
             Some(json!({ "database": db_name, "group": "tables" })),
         ),
         SduiTreeNode::new(
-            format!("group.{}.views", db_name),
+            format!("group.{}.views", enc_db),
             "Представления (Views)",
             "group",
             Some("folder-eye"),
@@ -104,7 +106,7 @@ pub fn build_database_groups(db_name: &str) -> Vec<SduiTreeNode> {
             Some(json!({ "database": db_name, "group": "views" })),
         ),
         SduiTreeNode::new(
-            format!("group.{}.dictionaries", db_name),
+            format!("group.{}.dictionaries", enc_db),
             "Словари (Dictionaries)",
             "group",
             Some("folder-book"),
@@ -116,9 +118,11 @@ pub fn build_database_groups(db_name: &str) -> Vec<SduiTreeNode> {
 
 /// Builds table/view sub-groups (`Columns`, `Partitions`) when a `table` node is expanded.
 pub fn build_table_groups(db_name: &str, table_name: &str) -> Vec<SduiTreeNode> {
+    let enc_db = encode_id_segment(db_name);
+    let enc_tbl = encode_id_segment(table_name);
     vec![
         SduiTreeNode::new(
-            format!("group_cols.{}.{}", db_name, table_name),
+            format!("group_cols.{}.{}", enc_db, enc_tbl),
             "Колонки (Columns)",
             "group_cols",
             Some("folder"),
@@ -126,7 +130,7 @@ pub fn build_table_groups(db_name: &str, table_name: &str) -> Vec<SduiTreeNode> 
             Some(json!({ "database": db_name, "table": table_name })),
         ),
         SduiTreeNode::new(
-            format!("group_parts.{}.{}", db_name, table_name),
+            format!("group_parts.{}.{}", enc_db, enc_tbl),
             "Партиции (Partitions)",
             "group_parts",
             Some("folder"),
@@ -164,7 +168,12 @@ pub fn parse_tables_nodes(
         let icon = if obj_type == "view" { "eye" } else { "table" };
 
         nodes.push(SduiTreeNode::new(
-            format!("{}.{}.{}", node_type, db_name, name),
+            format!(
+                "{}.{}.{}",
+                node_type,
+                encode_id_segment(db_name),
+                encode_id_segment(name)
+            ),
             name,
             node_type,
             Some(icon),
@@ -197,7 +206,11 @@ pub fn parse_dictionaries_nodes(
         let size = row.get(5).and_then(|v| v.as_str()).unwrap_or("0 B");
 
         nodes.push(SduiTreeNode::new(
-            format!("dict.{}.{}", db_name, name),
+            format!(
+                "dict.{}.{}",
+                encode_id_segment(db_name),
+                encode_id_segment(name)
+            ),
             name,
             "dictionary",
             Some("book"),
@@ -229,7 +242,12 @@ pub fn parse_columns_nodes(
         let comment = row.get(2).and_then(|v| v.as_str()).unwrap_or("");
 
         nodes.push(SduiTreeNode::new(
-            format!("col.{}.{}.{}", db_name, table_name, name),
+            format!(
+                "col.{}.{}.{}",
+                encode_id_segment(db_name),
+                encode_id_segment(table_name),
+                encode_id_segment(name)
+            ),
             format!("{} ({})", name, col_type),
             "column",
             Some("columns"),
@@ -261,7 +279,12 @@ pub fn parse_partitions_nodes(
         let parts_count = row.get(3).cloned().unwrap_or(json!(1));
 
         nodes.push(SduiTreeNode::new(
-            format!("part.{}.{}.{}", db_name, table_name, partition),
+            format!(
+                "part.{}.{}.{}",
+                encode_id_segment(db_name),
+                encode_id_segment(table_name),
+                encode_id_segment(partition)
+            ),
             format!("⚡ {}", partition),
             "partition",
             Some("archive"),

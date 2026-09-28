@@ -1,6 +1,7 @@
 use crate::driver::pool::ConnectionPool;
 use crate::error::DriverError;
 use crate::sdui::tree::*;
+use crate::utils::node_id::split_node_id;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
@@ -94,7 +95,7 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
         p.node_id, p.connection_id
     );
 
-    let parts: Vec<&str> = p.node_id.split('.').collect();
+    let parts: Vec<String> = split_node_id(&p.node_id);
     if parts.is_empty() {
         return Err(DriverError::Client(format!(
             "Invalid nodeId format: '{}'",
@@ -102,19 +103,19 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
         )));
     }
 
-    let prefix = parts[0];
+    let prefix = parts[0].as_str();
 
     // 1. Expand database -> Groups (Tables, Views, Dictionaries)
     if prefix == "db" && parts.len() >= 2 {
-        let db_name = parts[1];
+        let db_name = parts[1].as_str();
         let groups = build_database_groups(db_name);
         return Ok(json!({ "nodes": groups }));
     }
 
     // 2. Expand Table or View -> Groups (Columns, Partitions)
     if (prefix == "table" || prefix == "view") && parts.len() >= 3 {
-        let db_name = parts[1];
-        let table_name = parts[2];
+        let db_name = parts[1].as_str();
+        let table_name = parts[2].as_str();
         let groups = build_table_groups(db_name, table_name);
         return Ok(json!({ "nodes": groups }));
     }
@@ -124,8 +125,8 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
 
     // 3. Expand Group -> Tables / Views / Dictionaries
     if prefix == "group" && parts.len() >= 3 {
-        let db_name = parts[1];
-        let group_type = parts[2];
+        let db_name = parts[1].as_str();
+        let group_type = parts[2].as_str();
 
         if group_type == "tables" || group_type == "views" {
             let filter_view = group_type == "views";
@@ -168,8 +169,8 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
 
     // 4. Expand group_cols -> Columns
     if prefix == "group_cols" && parts.len() >= 3 {
-        let db_name = parts[1];
-        let table_name = parts[2];
+        let db_name = parts[1].as_str();
+        let table_name = parts[2].as_str();
         let sql = format!(
             "SELECT name, type, comment FROM system.columns WHERE database = '{}' AND table = '{}' ORDER BY position FORMAT JSONCompactEachRowWithNamesAndTypes",
             crate::utils::sql_escape::escape_sql_string_literal(db_name),
@@ -192,8 +193,8 @@ pub async fn handle_expand_tree_node(params: Option<Value>) -> Result<Value, Dri
 
     // 5. Expand group_parts -> Partitions
     if prefix == "group_parts" && parts.len() >= 3 {
-        let db_name = parts[1];
-        let table_name = parts[2];
+        let db_name = parts[1].as_str();
+        let table_name = parts[2].as_str();
         let sql = format!(
             "SELECT partition, sum(rows) AS total_rows, formatReadableSize(sum(data_compressed_bytes)) AS compressed_size, count() AS parts_count FROM system.parts WHERE database = '{}' AND table = '{}' AND active = 1 GROUP BY partition ORDER BY partition DESC FORMAT JSONCompactEachRowWithNamesAndTypes",
             crate::utils::sql_escape::escape_sql_string_literal(db_name),
@@ -395,11 +396,11 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
         .get(p.connection_id)
         .ok_or_else(|| DriverError::ConnectionNotFound(p.connection_id))?;
 
-    let parts: Vec<&str> = p.node_id.split('.').collect();
+    let parts: Vec<String> = split_node_id(&p.node_id);
     let (db_name, tbl_name) = if parts.len() >= 3 && (parts[0] == "table" || parts[0] == "view") {
-        (parts[1], parts[2])
+        (parts[1].as_str(), parts[2].as_str())
     } else if parts.len() >= 2 {
-        (parts[0], parts[1])
+        (parts[0].as_str(), parts[1].as_str())
     } else {
         ("default", p.node_id.as_str())
     };
@@ -544,6 +545,47 @@ mod tests {
         assert_eq!(res_parts["nodes"][0]["label"], "⚡ 202607");
 
         ConnectionPool::global().remove(402);
+    }
+
+    #[tokio::test]
+    async fn test_handle_expand_tree_node_dotted_database_name() {
+        use crate::utils::node_id::encode_id_segment;
+
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 406,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        // A database name containing a literal '.' (legal in ClickHouse via
+        // backtick-quoted identifiers) must not be misparsed as extra path
+        // segments when the nodeId is split back apart (CWE-20 regression).
+        let enc_db = encode_id_segment("my.db");
+        let db_node_id = format!("db.{}", enc_db);
+        assert_eq!(db_node_id, "db.my~ddb");
+
+        let res_db =
+            handle_expand_tree_node(Some(json!({ "connectionId": 406, "nodeId": db_node_id })))
+                .await
+                .unwrap();
+        let groups = res_db["nodes"].as_array().unwrap();
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0]["id"], format!("group.{}.tables", enc_db));
+
+        let res_tbl = handle_expand_tree_node(Some(
+            json!({ "connectionId": 406, "nodeId": groups[0]["id"].as_str().unwrap() }),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            res_tbl["nodes"][0]["id"],
+            format!("table.{}.events", enc_db)
+        );
+
+        ConnectionPool::global().remove(406);
     }
 
     #[tokio::test]
