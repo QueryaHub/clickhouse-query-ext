@@ -160,6 +160,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_compact_output_scalar_row() {
+        // Regression for issue #57: scalar introspection queries
+        // (SELECT version(), SELECT uptime(), SHOW CREATE TABLE) must be
+        // requested with FORMAT JSONCompactEachRowWithNamesAndTypes so this
+        // parser's fixed 2-header-line assumption holds; a bare
+        // JSONCompactEachRow response has no names/types lines and would
+        // previously fail with "missing names or types row".
+        let version_output = r#"["version()"]
+["String"]
+["24.3.1.2452"]"#;
+        let res = parse_compact_output(version_output, 0).unwrap();
+        assert_eq!(res.rows.len(), 1);
+        assert_eq!(res.rows[0][0], json!("24.3.1.2452"));
+
+        let uptime_output = r#"["uptime()"]
+["UInt32"]
+[123456]"#;
+        let res = parse_compact_output(uptime_output, 0).unwrap();
+        assert_eq!(res.rows[0][0].as_u64(), Some(123456));
+    }
+
+    #[test]
     fn test_parse_compact_output_empty() {
         let res = parse_compact_output("", 5).unwrap();
         assert!(res.columns.is_empty());
