@@ -293,15 +293,24 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
 
     let trimmed_sql = query_params.sql.trim();
     let upper_sql = trimmed_sql.to_uppercase();
-    let is_tabular_query = upper_sql.starts_with("SELECT")
-        || upper_sql.starts_with("SHOW")
-        || upper_sql.starts_with("DESCRIBE")
-        || upper_sql.starts_with("EXPLAIN");
+    // Classify on the comment-stripped statement so a leading `-- comment` or
+    // `/* comment */` doesn't hide the real starting keyword, and recognize
+    // `WITH ...` CTE queries as tabular too.
+    let normalized_sql = strip_sql_comments_and_trim(trimmed_sql);
+    let is_tabular_query = normalized_sql.starts_with("SELECT")
+        || normalized_sql.starts_with("SHOW")
+        || normalized_sql.starts_with("DESCRIBE")
+        || normalized_sql.starts_with("EXPLAIN")
+        || normalized_sql.starts_with("WITH");
 
-    let sql_to_run = if is_tabular_query && !upper_sql.contains("FORMAT ") {
+    let sql_to_run = if is_tabular_query && !normalized_sql.contains("FORMAT ") {
+        // FORMAT must precede the statement-terminating `;` in ClickHouse's
+        // grammar, so strip any trailing semicolon before appending it.
+        let sql_no_trailing_semicolon =
+            trimmed_sql.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
         format!(
             "{}\nFORMAT JSONCompactEachRowWithNamesAndTypes",
-            trimmed_sql
+            sql_no_trailing_semicolon
         )
     } else {
         trimmed_sql.to_string()
@@ -717,6 +726,58 @@ mod tests {
         assert_eq!(res["rows"][0][1], json!("page_view"));
 
         ConnectionPool::global().remove(111);
+    }
+
+    #[tokio::test]
+    async fn test_handle_query_tabular_detection_edge_cases() {
+        // Regression for issue #58: leading comments, CTE `WITH` queries and a
+        // trailing `;` must all still be classified as tabular queries.
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 112,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        for sql in [
+            "-- Top 10 users\nSELECT id, event_name, user_id FROM events",
+            "/* block comment */ SELECT id, event_name, user_id FROM events",
+            "WITH x AS (SELECT 1) SELECT id, event_name, user_id FROM events",
+            "SELECT id, event_name, user_id FROM events;",
+            "SELECT id, event_name, user_id FROM events;   ",
+        ] {
+            let query_params = json!({ "connectionId": 112, "sql": sql });
+            let res = handle_query(Some(query_params)).await.unwrap();
+            assert_eq!(
+                res["columns"].as_array().unwrap().len(),
+                3,
+                "expected tabular result for: {}",
+                sql
+            );
+            assert_eq!(res["rows"].as_array().unwrap().len(), 2);
+        }
+
+        ConnectionPool::global().remove(112);
+    }
+
+    #[test]
+    fn test_tabular_query_trailing_semicolon_format_placement() {
+        // The FORMAT clause must be appended before any trailing `;`, never after.
+        let trimmed_sql = "SELECT 1;";
+        let normalized_sql = strip_sql_comments_and_trim(trimmed_sql);
+        assert!(normalized_sql.starts_with("SELECT"));
+        let sql_no_trailing_semicolon =
+            trimmed_sql.trim_end_matches(|c: char| c == ';' || c.is_whitespace());
+        let sql_to_run = format!(
+            "{}\nFORMAT JSONCompactEachRowWithNamesAndTypes",
+            sql_no_trailing_semicolon
+        );
+        assert_eq!(
+            sql_to_run,
+            "SELECT 1\nFORMAT JSONCompactEachRowWithNamesAndTypes"
+        );
     }
 
     #[tokio::test]
