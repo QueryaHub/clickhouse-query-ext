@@ -1,4 +1,5 @@
 use crate::error::DriverError;
+use crate::utils::node_id::split_node_id;
 use crate::utils::sql_escape::{escape_sql_string_literal, quote_identifier};
 use serde::Serialize;
 
@@ -44,7 +45,7 @@ pub fn get_context_actions_for_node(
     node_type: &str,
     node_id: &str,
 ) -> Result<Vec<SduiContextAction>, DriverError> {
-    let parts: Vec<&str> = node_id.split('.').collect();
+    let parts: Vec<String> = split_node_id(node_id);
 
     match node_type {
         "server" | "root_databases" => Ok(vec![
@@ -83,8 +84,8 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
-            let table_name = parts[2];
+            let db_name = parts[1].as_str();
+            let table_name = parts[2].as_str();
             let q_db = quote_identifier(db_name);
             let q_tbl = quote_identifier(table_name);
             let esc_db = escape_sql_string_literal(db_name);
@@ -187,8 +188,8 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
-            let view_name = parts[2];
+            let db_name = parts[1].as_str();
+            let view_name = parts[2].as_str();
             let q_db = quote_identifier(db_name);
             let q_view = quote_identifier(view_name);
 
@@ -220,9 +221,9 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
-            let table_name = parts[2];
-            let partition = parts[3];
+            let db_name = parts[1].as_str();
+            let table_name = parts[2].as_str();
+            let partition = parts[3].as_str();
             let q_db = quote_identifier(db_name);
             let q_tbl = quote_identifier(table_name);
             let esc_part = escape_sql_string_literal(partition);
@@ -309,7 +310,7 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
+            let db_name = parts[1].as_str();
             let esc_db = escape_sql_string_literal(db_name);
 
             Ok(vec![
@@ -364,9 +365,9 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
-            let table_name = parts[2];
-            let col_name = parts[3];
+            let db_name = parts[1].as_str();
+            let table_name = parts[2].as_str();
+            let col_name = parts[3].as_str();
             let q_db = quote_identifier(db_name);
             let q_tbl = quote_identifier(table_name);
             let q_col = quote_identifier(col_name);
@@ -551,6 +552,24 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .contains("`user_id``; DROP TABLE users; --`")
+        );
+    }
+
+    #[test]
+    fn test_context_actions_with_dotted_table_name() {
+        use crate::utils::node_id::encode_id_segment;
+
+        // A table name containing a literal '.' must survive nodeId round-trip
+        // unmangled instead of being split into extra bogus segments (CWE-20).
+        let node_id = format!(
+            "table.{}.{}",
+            encode_id_segment("analytics"),
+            encode_id_segment("weird.table.name")
+        );
+        let actions = get_context_actions_for_node("table", &node_id).unwrap();
+        assert_eq!(
+            actions[0].sql.as_deref(),
+            Some("SELECT * FROM `analytics`.`weird.table.name` LIMIT 100")
         );
     }
 
