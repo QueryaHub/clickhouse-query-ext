@@ -322,13 +322,29 @@ pub async fn handle_get_server_stats(params: Option<Value>) -> Result<Value, Dri
     }
 
     let version_text = client
-        .post_sql("SELECT version() FORMAT JSONCompactEachRow", |_| {})
+        .post_sql(
+            "SELECT version() FORMAT JSONCompactEachRowWithNamesAndTypes",
+            |_| {},
+        )
         .await
-        .unwrap_or_else(|_| r#"["ClickHouse unknown"]"#.to_string());
+        .unwrap_or_else(|_| {
+            r#"["version()"]
+["String"]
+["unknown"]"#
+                .to_string()
+        });
     let uptime_text = client
-        .post_sql("SELECT uptime() FORMAT JSONCompactEachRow", |_| {})
+        .post_sql(
+            "SELECT uptime() FORMAT JSONCompactEachRowWithNamesAndTypes",
+            |_| {},
+        )
         .await
-        .unwrap_or_else(|_| r#"[0]"#.to_string());
+        .unwrap_or_else(|_| {
+            r#"["uptime()"]
+["UInt32"]
+[0]"#
+                .to_string()
+        });
 
     let mut version_str = "ClickHouse".to_string();
     if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&version_text, 0)
@@ -421,7 +437,7 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
     }
 
     let ddl_sql = format!(
-        "SHOW CREATE TABLE {}.{} FORMAT JSONCompactEachRow",
+        "SHOW CREATE TABLE {}.{} FORMAT JSONCompactEachRowWithNamesAndTypes",
         crate::utils::sql_escape::quote_identifier(db_name),
         crate::utils::sql_escape::quote_identifier(tbl_name)
     );
