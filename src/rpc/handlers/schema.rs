@@ -277,7 +277,7 @@ pub async fn handle_context_actions(params: Option<Value>) -> Result<Value, Driv
                     crate::utils::sql_escape::escape_sql_string_literal(col_name)
                 );
                 let text = run_introspection_query(p.connection_id, &sql).await?;
-                crate::mapper::row_compact::parse_compact_output(&text, 0)
+                crate::mapper::row_compact::parse_compact_output(&text, 0, None)
                     .ok()
                     .and_then(|result| result.rows.into_iter().next())
                     .and_then(|row| row.into_iter().next())
@@ -386,7 +386,7 @@ pub async fn handle_get_server_stats(params: Option<Value>) -> Result<Value, Dri
         });
 
     let mut version_str = "ClickHouse".to_string();
-    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&version_text, 0)
+    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&version_text, 0, None)
         && let Some(row) = parsed.rows.first()
         && let Some(v) = row.first().and_then(|x| x.as_str())
     {
@@ -394,7 +394,7 @@ pub async fn handle_get_server_stats(params: Option<Value>) -> Result<Value, Dri
     }
 
     let mut uptime_sec = 0;
-    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&uptime_text, 0)
+    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&uptime_text, 0, None)
         && let Some(row) = parsed.rows.first()
         && let Some(v) = row.first().and_then(|x| x.as_u64())
     {
@@ -409,7 +409,7 @@ pub async fn handle_get_server_stats(params: Option<Value>) -> Result<Value, Dri
         .await
         .unwrap_or_default();
     let mut db_sizes = serde_json::Map::new();
-    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&db_sizes_text, 0) {
+    if let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&db_sizes_text, 0, None) {
         for row in parsed.rows {
             if let (Some(db), Some(size)) = (
                 row.first().and_then(|x| x.as_str()),
@@ -482,7 +482,7 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
     );
     let mut ddl_str = String::new();
     if let Ok(text) = client.post_sql(&ddl_sql, |_| {}).await
-        && let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0)
+        && let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0, None)
         && let Some(row) = parsed.rows.first()
         && let Some(v) = row.first().and_then(|x| x.as_str())
     {
@@ -496,7 +496,7 @@ pub async fn handle_get_object_metadata(params: Option<Value>) -> Result<Value, 
     );
     let mut columns = Vec::new();
     if let Ok(text) = client.post_sql(&cols_sql, |_| {}).await
-        && let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0)
+        && let Ok(parsed) = crate::mapper::row_compact::parse_compact_output(&text, 0, None)
     {
         for row in parsed.rows {
             let name = row.first().and_then(|x| x.as_str()).unwrap_or("unknown");

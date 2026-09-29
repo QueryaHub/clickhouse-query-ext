@@ -44,7 +44,7 @@ pub fn build_root_databases_nodes(
     let mut nodes = Vec::new();
 
     if let Some(output) = compact_output {
-        let parsed = parse_compact_output(output, 0)?;
+        let parsed = parse_compact_output(output, 0, None)?;
         for row in parsed.rows {
             let name = row.first().and_then(|v| v.as_str()).unwrap_or("unknown");
             let engine = row.get(1).and_then(|v| v.as_str()).unwrap_or("");
@@ -146,7 +146,7 @@ pub fn parse_tables_nodes(
     compact_output: &str,
     filter_view: bool,
 ) -> Result<Vec<SduiTreeNode>, DriverError> {
-    let parsed = parse_compact_output(compact_output, 0)?;
+    let parsed = parse_compact_output(compact_output, 0, None)?;
     let mut nodes = Vec::new();
 
     for row in parsed.rows {
@@ -195,7 +195,7 @@ pub fn parse_dictionaries_nodes(
     db_name: &str,
     compact_output: &str,
 ) -> Result<Vec<SduiTreeNode>, DriverError> {
-    let parsed = parse_compact_output(compact_output, 0)?;
+    let parsed = parse_compact_output(compact_output, 0, None)?;
     let mut nodes = Vec::new();
 
     for row in parsed.rows {
@@ -233,7 +233,7 @@ pub fn parse_columns_nodes(
     table_name: &str,
     compact_output: &str,
 ) -> Result<Vec<SduiTreeNode>, DriverError> {
-    let parsed = parse_compact_output(compact_output, 0)?;
+    let parsed = parse_compact_output(compact_output, 0, None)?;
     let mut nodes = Vec::new();
 
     for row in parsed.rows {
@@ -269,7 +269,7 @@ pub fn parse_partitions_nodes(
     table_name: &str,
     compact_output: &str,
 ) -> Result<Vec<SduiTreeNode>, DriverError> {
-    let parsed = parse_compact_output(compact_output, 0)?;
+    let parsed = parse_compact_output(compact_output, 0, None)?;
     let mut nodes = Vec::new();
 
     for row in parsed.rows {
