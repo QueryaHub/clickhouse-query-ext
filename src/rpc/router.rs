@@ -1,5 +1,5 @@
 use crate::error::DriverError;
-use crate::rpc::handlers::{connection, query, schema, system};
+use crate::rpc::handlers::{commands, connection, query, schema, system};
 use serde_json::Value;
 
 pub async fn dispatch(method: &str, params: Option<Value>) -> Result<Value, DriverError> {
@@ -22,6 +22,7 @@ pub async fn dispatch(method: &str, params: Option<Value>) -> Result<Value, Driv
         "db.getObjectMetadata" | "db.getObjectDDL" => {
             schema::handle_get_object_metadata(params).await
         }
+        "commands.execute" => commands::handle_execute(params).await,
         _ => Err(DriverError::Rpc {
             code: -32601,
             message: format!("Method not found: {}", method),
@@ -89,6 +90,28 @@ mod tests {
         assert_eq!(res["ok"], true);
 
         ConnectionPool::global().remove(889);
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_commands_execute() {
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 890,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let params = json!({
+            "commandId": "clickhouse.serverStats",
+            "connectionId": 890
+        });
+
+        let res = dispatch("commands.execute", Some(params)).await.unwrap();
+        assert_eq!(res["serverVersion"], "ClickHouse 24.3 (Mock)");
+
+        ConnectionPool::global().remove(890);
     }
 
     #[tokio::test]

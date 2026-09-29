@@ -41,6 +41,28 @@
         "defaultPort": 8123,
         "connectionFormSchema": "assets/connection_form.json"
       }
+    ],
+    "commands": [
+      {
+        "id": "clickhouse.optimizeFinal",
+        "title": "ClickHouse: Optimize Table (FINAL)",
+        "category": "ClickHouse"
+      },
+      {
+        "id": "clickhouse.deduplicate",
+        "title": "ClickHouse: Deduplicate Table",
+        "category": "ClickHouse"
+      },
+      {
+        "id": "clickhouse.serverStats",
+        "title": "ClickHouse: Show Server Statistics",
+        "category": "ClickHouse"
+      },
+      {
+        "id": "clickhouse.dropPartition",
+        "title": "ClickHouse: Drop Selected Partition",
+        "category": "ClickHouse"
+      }
     ]
   }
 }
