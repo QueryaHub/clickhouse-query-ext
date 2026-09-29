@@ -85,6 +85,7 @@ name = "clickhouse-query-ext"
 version = "1.0.1"
 dependencies = [
  "anyhow",
+ "bytes",
  "futures",
  "libc",
  "regex",
