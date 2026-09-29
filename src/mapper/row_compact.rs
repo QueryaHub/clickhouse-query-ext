@@ -19,6 +19,88 @@ pub struct QueryResult {
     pub statistics: QueryStatistics,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub query_id: Option<String>,
+    /// `true` when `limit` (or the streaming safety byte cap) cut the result
+    /// short of what ClickHouse actually had to offer, so the caller knows
+    /// `rows` isn't the complete result set.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_truncated: bool,
+}
+
+/// Parses the `["name", ...]` / `["Type", ...]` header lines of
+/// `FORMAT JSONCompactEachRowWithNamesAndTypes` output into `ColumnSchema`s.
+/// Shared by both the buffered (`parse_compact_output`) and streaming
+/// (`crate::driver::streaming::stream_compact_output`) parsers.
+pub(crate) fn parse_columns(
+    names_line: &str,
+    types_line: &str,
+) -> Result<Vec<ColumnSchema>, DriverError> {
+    let names: Vec<String> = serde_json::from_str(names_line).map_err(|e| {
+        DriverError::Client(format!(
+            "Failed to parse column names from ClickHouse output: {}",
+            e
+        ))
+    })?;
+    let types: Vec<String> = serde_json::from_str(types_line).map_err(|e| {
+        DriverError::Client(format!(
+            "Failed to parse column types from ClickHouse output: {}",
+            e
+        ))
+    })?;
+
+    if names.len() != types.len() {
+        return Err(DriverError::Client(format!(
+            "Column names count ({}) does not match types count ({})",
+            names.len(),
+            types.len()
+        )));
+    }
+
+    Ok(names
+        .into_iter()
+        .zip(types)
+        .map(|(name, ch_type)| ColumnSchema::new(name, ch_type))
+        .collect())
+}
+
+/// Parses a single `[value, value, ...]` data row line and normalizes it
+/// according to each column's `mapped_type` (e.g. converting 64-bit numbers
+/// and Decimals into JSON strings to prevent 53-bit float overflow in
+/// JS/Flutter). Shared by both the buffered and streaming parsers.
+pub(crate) fn parse_and_normalize_row(
+    line: &str,
+    columns: &[ColumnSchema],
+) -> Result<Vec<Value>, DriverError> {
+    let mut raw_row: Vec<Value> = serde_json::from_str(line).map_err(|e| {
+        DriverError::Client(format!(
+            "Failed to parse data row JSON array from ClickHouse: {}",
+            e
+        ))
+    })?;
+
+    for (i, col) in columns.iter().enumerate() {
+        if let Some(val) = raw_row.get_mut(i) {
+            if val.is_null() {
+                continue;
+            }
+            match col.mapped_type {
+                "string" => {
+                    // 64-bit/large integers and Decimals may arrive as JSON numbers from ClickHouse
+                    if val.is_number() {
+                        *val = Value::String(val.to_string());
+                    }
+                }
+                "integer" => {
+                    if let Some(s) = val.as_str()
+                        && let Ok(n) = s.parse::<i64>()
+                    {
+                        *val = Value::Number(serde_json::Number::from(n));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(raw_row)
 }
 
 /// Parses the output of ClickHouse `FORMAT JSONCompactEachRowWithNamesAndTypes`.
@@ -51,6 +133,7 @@ pub fn parse_compact_output(
                 elapsed_ms,
             },
             query_id: None,
+            is_truncated: false,
         });
     };
 
@@ -61,70 +144,16 @@ pub fn parse_compact_output(
         ));
     };
 
-    let names: Vec<String> = serde_json::from_str(names_line).map_err(|e| {
-        DriverError::Client(format!(
-            "Failed to parse column names from ClickHouse output: {}",
-            e
-        ))
-    })?;
-    let types: Vec<String> = serde_json::from_str(types_line).map_err(|e| {
-        DriverError::Client(format!(
-            "Failed to parse column types from ClickHouse output: {}",
-            e
-        ))
-    })?;
-
-    if names.len() != types.len() {
-        return Err(DriverError::Client(format!(
-            "Column names count ({}) does not match types count ({})",
-            names.len(),
-            types.len()
-        )));
-    }
-
-    let mut columns = Vec::with_capacity(names.len());
-    for (name, ch_type) in names.into_iter().zip(types) {
-        columns.push(ColumnSchema::new(name, ch_type));
-    }
+    let columns = parse_columns(names_line, types_line)?;
 
     let mut rows = Vec::with_capacity(limit.unwrap_or(16).min(1024));
+    let mut is_truncated = false;
     for line in lines {
         if limit.is_some_and(|limit| rows.len() >= limit) {
+            is_truncated = true;
             break;
         }
-
-        let mut raw_row: Vec<Value> = serde_json::from_str(line).map_err(|e| {
-            DriverError::Client(format!(
-                "Failed to parse data row JSON array from ClickHouse: {}",
-                e
-            ))
-        })?;
-
-        // Normalize values according to Querya schema mapped_type
-        for (i, col) in columns.iter().enumerate() {
-            if let Some(val) = raw_row.get_mut(i) {
-                if val.is_null() {
-                    continue;
-                }
-                match col.mapped_type {
-                    "string" => {
-                        // 64-bit/large integers and Decimals may arrive as JSON numbers from ClickHouse
-                        if val.is_number() {
-                            *val = Value::String(val.to_string());
-                        }
-                    }
-                    "integer" => {
-                        if let Some(s) = val.as_str()
-                            && let Ok(n) = s.parse::<i64>()
-                        {
-                            *val = Value::Number(serde_json::Number::from(n));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        rows.push(raw_row);
+        rows.push(parse_and_normalize_row(line, &columns)?);
     }
 
     let rows_read = rows.len();
@@ -137,6 +166,7 @@ pub fn parse_compact_output(
             elapsed_ms,
         },
         query_id: None,
+        is_truncated,
     })
 }
 
@@ -218,6 +248,7 @@ mod tests {
         let unlimited = parse_compact_output(raw_output, 0, None).unwrap();
         assert_eq!(unlimited.rows.len(), 5);
         assert_eq!(unlimited.statistics.rows_read, 5);
+        assert!(!unlimited.is_truncated);
 
         let limited = parse_compact_output(raw_output, 0, Some(2)).unwrap();
         assert_eq!(limited.rows.len(), 2);
@@ -225,10 +256,13 @@ mod tests {
         assert_eq!(limited.rows[0][0], json!("1"));
         assert_eq!(limited.rows[1][0], json!("2"));
         assert_eq!(limited.statistics.rows_read, 2);
+        assert!(limited.is_truncated);
 
-        // A limit larger than the actual row count is a no-op.
+        // A limit larger than the actual row count is a no-op, and isn't
+        // reported as truncated since nothing was actually cut off.
         let generous_limit = parse_compact_output(raw_output, 0, Some(100)).unwrap();
         assert_eq!(generous_limit.rows.len(), 5);
+        assert!(!generous_limit.is_truncated);
 
         // A zero limit returns no rows at all, without erroring.
         let zero_limit = parse_compact_output(raw_output, 0, Some(0)).unwrap();

@@ -165,14 +165,15 @@ impl ClickHouseClient {
         req
     }
 
+    async fn error_from_response(resp: reqwest::Response) -> DriverError {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        DriverError::Client(format!("ClickHouse HTTP error {}: {}", status, text))
+    }
+
     async fn read_response(resp: reqwest::Response) -> Result<String, DriverError> {
         if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(DriverError::Client(format!(
-                "ClickHouse HTTP error {}: {}",
-                status, text
-            )));
+            return Err(Self::error_from_response(resp).await);
         }
         Ok(resp.text().await?)
     }
@@ -245,6 +246,41 @@ impl ClickHouseClient {
                 }
                 Err(err) => return Err(err),
             }
+        }
+    }
+
+    /// Like `post_sql`, but on success returns the raw streaming `reqwest::Response`
+    /// instead of buffering the whole body into a `String`, so a large analytical
+    /// result set can be parsed incrementally as it arrives over the network via
+    /// `crate::driver::streaming::stream_compact_output` (issue #49). Callers must
+    /// gate on mock/test connections themselves, same as before calling `post_sql`.
+    pub async fn post_sql_response(
+        &self,
+        sql: &str,
+        mut extra_params: impl FnMut(&mut Url),
+    ) -> Result<reqwest::Response, DriverError> {
+        let sql = sql.to_string();
+        let mut omit = self.omit_readonly_setting();
+        loop {
+            let mut url = Url::parse(&self.base_url)?;
+            url.query_pairs_mut()
+                .append_pair("database", &self.database);
+            extra_params(&mut url);
+            self.append_safe_mode_settings_with(&mut url, omit);
+            let req = self
+                .apply_auth(self.http_client.post(url))
+                .body(sql.clone());
+            let resp = req.send().await?;
+            if resp.status().is_success() {
+                return Ok(resp);
+            }
+            let err = Self::error_from_response(resp).await;
+            if self.readonly && !omit && Self::is_readonly_setting_conflict(&err) {
+                self.mark_server_readonly_enforced();
+                omit = true;
+                continue;
+            }
+            return Err(err);
         }
     }
 

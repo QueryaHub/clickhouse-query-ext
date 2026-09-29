@@ -2,6 +2,7 @@ use crate::driver::pool::ConnectionPool;
 use crate::error::DriverError;
 use crate::mapper::row_compact::parse_compact_output;
 use crate::utils::secret_guard::ConnectionSecretsPool;
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -360,19 +361,33 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
 
     // 3. Real ClickHouse HTTP request
     let actual_query_id_for_url = actual_query_id.clone();
-    let text = client
-        .post_sql(&sql_to_run, |url| {
-            url.query_pairs_mut()
-                .append_pair("query_id", &actual_query_id_for_url);
-        })
-        .await?;
-    let elapsed = start_time.elapsed().as_millis() as u64;
-
     if is_tabular_query {
-        let mut result = parse_compact_output(&text, elapsed, query_params.limit)?;
+        // Stream and parse the response row-by-row instead of buffering the
+        // whole body into a String first, bounding peak memory for large
+        // analytical result sets (issue #49).
+        let response = client
+            .post_sql_response(&sql_to_run, |url| {
+                url.query_pairs_mut()
+                    .append_pair("query_id", &actual_query_id_for_url);
+            })
+            .await?;
+        let byte_stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(std::io::Error::other));
+        let mut result =
+            crate::driver::streaming::stream_compact_output(byte_stream, query_params.limit)
+                .await?;
+        result.statistics.elapsed_ms = start_time.elapsed().as_millis() as u64;
         result.query_id = Some(actual_query_id);
         Ok(serde_json::to_value(result)?)
     } else {
+        let text = client
+            .post_sql(&sql_to_run, |url| {
+                url.query_pairs_mut()
+                    .append_pair("query_id", &actual_query_id_for_url);
+            })
+            .await?;
+        let elapsed = start_time.elapsed().as_millis() as u64;
         Ok(build_non_tabular_result(
             &upper_sql,
             elapsed,
