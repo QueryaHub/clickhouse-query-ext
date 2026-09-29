@@ -246,7 +246,7 @@ pub async fn handle_context_actions(params: Option<Value>) -> Result<Value, Driv
         })?;
 
     // Verify connection exists in pool
-    let _client = ConnectionPool::global()
+    let client = ConnectionPool::global()
         .get(p.connection_id)
         .ok_or_else(|| DriverError::ConnectionNotFound(p.connection_id))?;
 
@@ -255,7 +255,46 @@ pub async fn handle_context_actions(params: Option<Value>) -> Result<Value, Driv
         p.connection_id, p.node_type, p.node_id
     );
 
-    let actions = crate::sdui::actions::get_context_actions_for_node(&p.node_type, &p.node_id)?;
+    // For a column node, look up its ClickHouse type so the Column Profiler
+    // (`column.stats`/`column.top_10`) can pick a query that's valid for that
+    // type instead of unconditionally emitting min()/max()/topK() and GROUP BY,
+    // which ClickHouse rejects for Array/Map/Tuple columns (issue #60).
+    let column_type = if p.node_type == "column" {
+        let parts = split_node_id(&p.node_id);
+        if parts.len() >= 4 {
+            let is_mock =
+                client.base_url.starts_with("mock://") || client.base_url.starts_with("test://");
+            if is_mock {
+                None
+            } else {
+                let db_name = &parts[1];
+                let table_name = &parts[2];
+                let col_name = &parts[3];
+                let sql = format!(
+                    "SELECT type FROM system.columns WHERE database = '{}' AND table = '{}' AND name = '{}' LIMIT 1 FORMAT JSONCompactEachRowWithNamesAndTypes",
+                    crate::utils::sql_escape::escape_sql_string_literal(db_name),
+                    crate::utils::sql_escape::escape_sql_string_literal(table_name),
+                    crate::utils::sql_escape::escape_sql_string_literal(col_name)
+                );
+                let text = run_introspection_query(p.connection_id, &sql).await?;
+                crate::mapper::row_compact::parse_compact_output(&text, 0)
+                    .ok()
+                    .and_then(|result| result.rows.into_iter().next())
+                    .and_then(|row| row.into_iter().next())
+                    .and_then(|v| v.as_str().map(|s| s.to_string()))
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let actions = crate::sdui::actions::get_context_actions_for_node(
+        &p.node_type,
+        &p.node_id,
+        column_type.as_deref(),
+    )?;
     Ok(json!({ "actions": actions }))
 }
 
@@ -635,6 +674,41 @@ mod tests {
         assert_eq!(actions[0]["id"], "table.top_100");
 
         ConnectionPool::global().remove(403);
+    }
+
+    #[tokio::test]
+    async fn test_handle_context_actions_for_column_on_mock_connection() {
+        // A mock connection has no real system.columns to look up, so the type
+        // lookup is skipped and column_type stays None, falling back to the
+        // scalar-oriented profiling query (issue #60).
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 404,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let params = json!({
+            "connectionId": 404,
+            "nodeType": "column",
+            "nodeId": "col.analytics.events.user_id"
+        });
+
+        let res = handle_context_actions(Some(params)).await.unwrap();
+        let actions = res["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0]["id"], "column.stats");
+        assert!(
+            actions[0]["sql"]
+                .as_str()
+                .unwrap()
+                .contains("min(`user_id`)")
+        );
+        assert_eq!(actions[1]["id"], "column.top_10");
+
+        ConnectionPool::global().remove(404);
     }
 
     #[tokio::test]
