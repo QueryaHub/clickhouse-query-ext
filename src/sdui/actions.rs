@@ -1,4 +1,6 @@
 use crate::error::DriverError;
+use crate::utils::node_id::split_node_id;
+use crate::utils::sql_escape::{escape_sql_string_literal, quote_identifier};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -38,12 +40,29 @@ impl SduiContextAction {
     }
 }
 
+/// Returns `true` if a ClickHouse column type is a complex type (`Array`, `Map`,
+/// `Tuple`) that the `min`/`max`/`topK` aggregate functions cannot operate on
+/// directly, so the Column Profiler must fall back to type-appropriate queries.
+fn is_complex_clickhouse_type(column_type: &str) -> bool {
+    let mut t = column_type.trim();
+    if let Some(inner) = t.strip_prefix("Nullable(") {
+        t = inner.trim_end_matches(')');
+    }
+    t.starts_with("Array(") || t.starts_with("Map(") || t.starts_with("Tuple(")
+}
+
 /// Generates SDUI context menu actions based on `nodeType` and `nodeId`.
+///
+/// `column_type` is the ClickHouse type of the target column (e.g. from
+/// `system.columns`), used only for `nodeType == "column"` to choose a
+/// profiling query that's valid for the column's type. Pass `None` when the
+/// type is unknown; the scalar-oriented query is used as a safe default.
 pub fn get_context_actions_for_node(
     node_type: &str,
     node_id: &str,
+    column_type: Option<&str>,
 ) -> Result<Vec<SduiContextAction>, DriverError> {
-    let parts: Vec<&str> = node_id.split('.').collect();
+    let parts: Vec<String> = split_node_id(node_id);
 
     match node_type {
         "server" | "root_databases" => Ok(vec![
@@ -82,8 +101,12 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
-            let table_name = parts[2];
+            let db_name = parts[1].as_str();
+            let table_name = parts[2].as_str();
+            let q_db = quote_identifier(db_name);
+            let q_tbl = quote_identifier(table_name);
+            let esc_db = escape_sql_string_literal(db_name);
+            let esc_tbl = escape_sql_string_literal(table_name);
 
             Ok(vec![
                 SduiContextAction::new(
@@ -93,7 +116,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT * FROM {}.{} LIMIT 100",
-                        db_name, table_name
+                        q_db, q_tbl
                     )),
                     false,
                     false,
@@ -103,7 +126,7 @@ pub fn get_context_actions_for_node(
                     "📜 Show DDL (SHOW CREATE TABLE)",
                     Some("code"),
                     "query",
-                    Some(format!("SHOW CREATE TABLE {}.{}", db_name, table_name)),
+                    Some(format!("SHOW CREATE TABLE {}.{}", q_db, q_tbl)),
                     false,
                     false,
                 ),
@@ -121,7 +144,7 @@ pub fn get_context_actions_for_node(
                     "🔨 Optimize Table (FINAL)",
                     Some("tool"),
                     "execute",
-                    Some(format!("OPTIMIZE TABLE {}.{} FINAL", db_name, table_name)),
+                    Some(format!("OPTIMIZE TABLE {}.{} FINAL", q_db, q_tbl)),
                     true,
                     false,
                 ),
@@ -132,7 +155,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "OPTIMIZE TABLE {}.{} DEDUPLICATE",
-                        db_name, table_name
+                        q_db, q_tbl
                     )),
                     true,
                     false,
@@ -144,7 +167,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT mutation_id, command, create_time, parts_to_do, is_done FROM system.mutations WHERE database = '{}' AND table = '{}' AND is_done = 0",
-                        db_name, table_name
+                        esc_db, esc_tbl
                     )),
                     false,
                     false,
@@ -156,7 +179,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT query_id, user, query, elapsed, formatReadableSize(memory_usage) AS mem FROM system.processes WHERE current_database = '{}' AND query LIKE '%{}%' AND query NOT LIKE '%system.processes%'",
-                        db_name, table_name
+                        esc_db, esc_tbl
                     )),
                     false,
                     false,
@@ -168,7 +191,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "KILL MUTATION WHERE database = '{}' AND table = '{}'",
-                        db_name, table_name
+                        esc_db, esc_tbl
                     )),
                     true,
                     true,
@@ -182,8 +205,10 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
-            let view_name = parts[2];
+            let db_name = parts[1].as_str();
+            let view_name = parts[2].as_str();
+            let q_db = quote_identifier(db_name);
+            let q_view = quote_identifier(view_name);
 
             Ok(vec![
                 SduiContextAction::new(
@@ -191,7 +216,7 @@ pub fn get_context_actions_for_node(
                     "⚡ Top 100 Rows",
                     Some("eye"),
                     "query",
-                    Some(format!("SELECT * FROM {}.{} LIMIT 100", db_name, view_name)),
+                    Some(format!("SELECT * FROM {}.{} LIMIT 100", q_db, q_view)),
                     false,
                     false,
                 ),
@@ -200,7 +225,7 @@ pub fn get_context_actions_for_node(
                     "📜 Show DDL (SHOW CREATE TABLE)",
                     Some("code"),
                     "query",
-                    Some(format!("SHOW CREATE TABLE {}.{}", db_name, view_name)),
+                    Some(format!("SHOW CREATE TABLE {}.{}", q_db, q_view)),
                     false,
                     false,
                 ),
@@ -213,9 +238,12 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
-            let table_name = parts[2];
-            let partition = parts[3];
+            let db_name = parts[1].as_str();
+            let table_name = parts[2].as_str();
+            let partition = parts[3].as_str();
+            let q_db = quote_identifier(db_name);
+            let q_tbl = quote_identifier(table_name);
+            let esc_part = escape_sql_string_literal(partition);
 
             Ok(vec![
                 SduiContextAction::new(
@@ -225,7 +253,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "ALTER TABLE {}.{} DROP PARTITION '{}'",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     true,
                     true,
@@ -237,7 +265,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "ALTER TABLE {}.{} FREEZE PARTITION '{}'",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     false,
                     false,
@@ -249,7 +277,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "ALTER TABLE {}.{} DETACH PARTITION '{}'",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     true,
                     true,
@@ -261,7 +289,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "ALTER TABLE {}.{} ATTACH PARTITION '{}'",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     false,
                     false,
@@ -273,7 +301,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "OPTIMIZE TABLE {}.{} PARTITION '{}' FINAL",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     true,
                     false,
@@ -285,7 +313,7 @@ pub fn get_context_actions_for_node(
                     "execute",
                     Some(format!(
                         "OPTIMIZE TABLE {}.{} PARTITION '{}' DEDUPLICATE",
-                        db_name, table_name, partition
+                        q_db, q_tbl, esc_part
                     )),
                     true,
                     false,
@@ -299,7 +327,8 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
+            let db_name = parts[1].as_str();
+            let esc_db = escape_sql_string_literal(db_name);
 
             Ok(vec![
                 SduiContextAction::new(
@@ -309,7 +338,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT mutation_id, table, command, create_time, parts_to_do FROM system.mutations WHERE database = '{}' AND is_done = 0",
-                        db_name
+                        esc_db
                     )),
                     false,
                     false,
@@ -321,7 +350,7 @@ pub fn get_context_actions_for_node(
                     "query",
                     Some(format!(
                         "SELECT query_id, user, query, elapsed, formatReadableSize(memory_usage) AS mem FROM system.processes WHERE current_database = '{}'",
-                        db_name
+                        esc_db
                     )),
                     false,
                     false,
@@ -331,7 +360,7 @@ pub fn get_context_actions_for_node(
                     "🛑 Kill Mutations in Database",
                     Some("x-circle"),
                     "execute",
-                    Some(format!("KILL MUTATION WHERE database = '{}'", db_name)),
+                    Some(format!("KILL MUTATION WHERE database = '{}'", esc_db)),
                     true,
                     true,
                 ),
@@ -340,7 +369,7 @@ pub fn get_context_actions_for_node(
                     "🛑 Kill Queries in Database",
                     Some("x-circle"),
                     "execute",
-                    Some(format!("KILL QUERY WHERE current_database = '{}' ASYNC", db_name)),
+                    Some(format!("KILL QUERY WHERE current_database = '{}' ASYNC", esc_db)),
                     true,
                     true,
                 ),
@@ -353,36 +382,56 @@ pub fn get_context_actions_for_node(
                     node_id
                 )));
             }
-            let db_name = parts[1];
-            let table_name = parts[2];
-            let col_name = parts[3];
+            let db_name = parts[1].as_str();
+            let table_name = parts[2].as_str();
+            let col_name = parts[3].as_str();
+            let q_db = quote_identifier(db_name);
+            let q_tbl = quote_identifier(table_name);
+            let q_col = quote_identifier(col_name);
 
-            Ok(vec![
-                SduiContextAction::new(
-                    "column.stats",
-                    "📈 Column Statistics (Быстрый профайлер)",
-                    Some("bar-chart"),
-                    "query",
-                    Some(format!(
+            // `min`/`max`/`topK` cannot operate on Array/Map/Tuple columns in
+            // ClickHouse (ILLEGAL_TYPE_OF_ARGUMENT), and GROUP BY on a Map column
+            // is rejected outright, so complex-typed columns get a profiling
+            // query built from length()/uniqueness instead, and no "Top 10
+            // Frequent Values" action (see issue #60).
+            let is_complex = column_type.is_some_and(is_complex_clickhouse_type);
+
+            let mut actions = vec![SduiContextAction::new(
+                "column.stats",
+                "📈 Column Statistics (Быстрый профайлер)",
+                Some("bar-chart"),
+                "query",
+                Some(if is_complex {
+                    format!(
+                        "SELECT count() as total_rows, countIf(isNotNull({0})) as not_nulls, uniqExact({0}) as unique_exact, min(length({0})) as min_length, max(length({0})) as max_length FROM {1}.{2}",
+                        q_col, q_db, q_tbl
+                    )
+                } else {
+                    format!(
                         "SELECT count() as total_rows, countIf(isNotNull({0})) as not_nulls, uniqExact({0}) as unique_exact, min({0}) as min_val, max({0}) as max_val, topK(5)({0}) as top_5_values FROM {1}.{2}",
-                        col_name, db_name, table_name
-                    )),
-                    false,
-                    false,
-                ),
-                SduiContextAction::new(
+                        q_col, q_db, q_tbl
+                    )
+                }),
+                false,
+                false,
+            )];
+
+            if !is_complex {
+                actions.push(SduiContextAction::new(
                     "column.top_10",
                     "🔝 Top 10 Frequent Values",
                     Some("list"),
                     "query",
                     Some(format!(
                         "SELECT {0}, count() as cnt FROM {1}.{2} GROUP BY {0} ORDER BY cnt DESC LIMIT 10",
-                        col_name, db_name, table_name
+                        q_col, q_db, q_tbl
                     )),
                     false,
                     false,
-                ),
-            ])
+                ));
+            }
+
+            Ok(actions)
         }
         _ => Ok(Vec::new()),
     }
@@ -394,19 +443,20 @@ mod tests {
 
     #[test]
     fn test_table_context_actions() {
-        let actions = get_context_actions_for_node("table", "table.analytics.events").unwrap();
+        let actions =
+            get_context_actions_for_node("table", "table.analytics.events", None).unwrap();
         assert_eq!(actions.len(), 8);
         assert_eq!(actions[0].id, "table.top_100");
         assert_eq!(
             actions[0].sql.as_deref(),
-            Some("SELECT * FROM analytics.events LIMIT 100")
+            Some("SELECT * FROM `analytics`.`events` LIMIT 100")
         );
         assert!(!actions[0].requires_confirmation);
 
         assert_eq!(actions[3].id, "table.optimize_final");
         assert_eq!(
             actions[3].sql.as_deref(),
-            Some("OPTIMIZE TABLE analytics.events FINAL")
+            Some("OPTIMIZE TABLE `analytics`.`events` FINAL")
         );
         assert!(actions[3].requires_confirmation);
 
@@ -417,12 +467,13 @@ mod tests {
     #[test]
     fn test_partition_context_actions() {
         let actions =
-            get_context_actions_for_node("partition", "part.analytics.events.202607").unwrap();
+            get_context_actions_for_node("partition", "part.analytics.events.202607", None)
+                .unwrap();
         assert_eq!(actions.len(), 6);
         assert_eq!(actions[0].id, "partition.drop");
         assert_eq!(
             actions[0].sql.as_deref(),
-            Some("ALTER TABLE analytics.events DROP PARTITION '202607'")
+            Some("ALTER TABLE `analytics`.`events` DROP PARTITION '202607'")
         );
         assert!(actions[0].requires_confirmation);
         assert!(actions[0].danger);
@@ -430,7 +481,7 @@ mod tests {
         assert_eq!(actions[1].id, "partition.freeze");
         assert_eq!(
             actions[1].sql.as_deref(),
-            Some("ALTER TABLE analytics.events FREEZE PARTITION '202607'")
+            Some("ALTER TABLE `analytics`.`events` FREEZE PARTITION '202607'")
         );
         assert!(!actions[1].requires_confirmation);
         assert!(!actions[1].danger);
@@ -438,7 +489,7 @@ mod tests {
         assert_eq!(actions[2].id, "partition.detach");
         assert_eq!(
             actions[2].sql.as_deref(),
-            Some("ALTER TABLE analytics.events DETACH PARTITION '202607'")
+            Some("ALTER TABLE `analytics`.`events` DETACH PARTITION '202607'")
         );
         assert!(actions[2].requires_confirmation);
         assert!(actions[2].danger);
@@ -446,7 +497,7 @@ mod tests {
         assert_eq!(actions[3].id, "partition.attach");
         assert_eq!(
             actions[3].sql.as_deref(),
-            Some("ALTER TABLE analytics.events ATTACH PARTITION '202607'")
+            Some("ALTER TABLE `analytics`.`events` ATTACH PARTITION '202607'")
         );
         assert!(!actions[3].requires_confirmation);
         assert!(!actions[3].danger);
@@ -454,21 +505,21 @@ mod tests {
         assert_eq!(actions[4].id, "partition.optimize_final");
         assert_eq!(
             actions[4].sql.as_deref(),
-            Some("OPTIMIZE TABLE analytics.events PARTITION '202607' FINAL")
+            Some("OPTIMIZE TABLE `analytics`.`events` PARTITION '202607' FINAL")
         );
         assert!(actions[4].requires_confirmation);
 
         assert_eq!(actions[5].id, "partition.deduplicate");
         assert_eq!(
             actions[5].sql.as_deref(),
-            Some("OPTIMIZE TABLE analytics.events PARTITION '202607' DEDUPLICATE")
+            Some("OPTIMIZE TABLE `analytics`.`events` PARTITION '202607' DEDUPLICATE")
         );
         assert!(actions[5].requires_confirmation);
     }
 
     #[test]
     fn test_database_and_view_actions() {
-        let db_actions = get_context_actions_for_node("database", "db.analytics").unwrap();
+        let db_actions = get_context_actions_for_node("database", "db.analytics", None).unwrap();
         assert_eq!(db_actions.len(), 4);
         assert_eq!(db_actions[0].id, "db.active_mutations");
         assert_eq!(db_actions[1].id, "db.active_queries");
@@ -476,14 +527,19 @@ mod tests {
         assert_eq!(db_actions[3].id, "db.kill_queries");
 
         let view_actions =
-            get_context_actions_for_node("view", "view.analytics.mv_summary").unwrap();
+            get_context_actions_for_node("view", "view.analytics.mv_summary", None).unwrap();
         assert_eq!(view_actions.len(), 2);
         assert_eq!(view_actions[0].id, "view.top_100");
+        assert_eq!(
+            view_actions[0].sql.as_deref(),
+            Some("SELECT * FROM `analytics`.`mv_summary` LIMIT 100")
+        );
     }
 
     #[test]
     fn test_server_and_process_monitoring_actions() {
-        let server_actions = get_context_actions_for_node("server", "server.cluster").unwrap();
+        let server_actions =
+            get_context_actions_for_node("server", "server.cluster", None).unwrap();
         assert_eq!(server_actions.len(), 3);
         assert_eq!(server_actions[0].id, "server.active_mutations");
         assert_eq!(server_actions[1].id, "server.active_queries");
@@ -494,13 +550,13 @@ mod tests {
     #[test]
     fn test_column_context_actions() {
         let actions =
-            get_context_actions_for_node("column", "col.analytics.events.user_id").unwrap();
+            get_context_actions_for_node("column", "col.analytics.events.user_id", None).unwrap();
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].id, "column.stats");
         assert_eq!(
             actions[0].sql.as_deref(),
             Some(
-                "SELECT count() as total_rows, countIf(isNotNull(user_id)) as not_nulls, uniqExact(user_id) as unique_exact, min(user_id) as min_val, max(user_id) as max_val, topK(5)(user_id) as top_5_values FROM analytics.events"
+                "SELECT count() as total_rows, countIf(isNotNull(`user_id`)) as not_nulls, uniqExact(`user_id`) as unique_exact, min(`user_id`) as min_val, max(`user_id`) as max_val, topK(5)(`user_id`) as top_5_values FROM `analytics`.`events`"
             )
         );
         assert_eq!(actions[0].action_type, "query");
@@ -509,15 +565,125 @@ mod tests {
         assert_eq!(
             actions[1].sql.as_deref(),
             Some(
-                "SELECT user_id, count() as cnt FROM analytics.events GROUP BY user_id ORDER BY cnt DESC LIMIT 10"
+                "SELECT `user_id`, count() as cnt FROM `analytics`.`events` GROUP BY `user_id` ORDER BY cnt DESC LIMIT 10"
             )
         );
     }
 
     #[test]
+    fn test_column_context_actions_for_complex_types() {
+        // Regression for issue #60: min()/max()/topK() abort with
+        // ILLEGAL_TYPE_OF_ARGUMENT on Array/Map/Tuple columns, and GROUP BY
+        // on a raw Map column is rejected outright, so complex-typed columns
+        // must get a length()-based profiling query and no top_10 action.
+        for complex_type in [
+            "Array(String)",
+            "Map(String, UInt64)",
+            "Tuple(Int32, String)",
+            "Nullable(Array(String))",
+        ] {
+            let actions = get_context_actions_for_node(
+                "column",
+                "col.analytics.events.tags",
+                Some(complex_type),
+            )
+            .unwrap();
+            assert_eq!(
+                actions.len(),
+                1,
+                "expected only column.stats for type {}",
+                complex_type
+            );
+            assert_eq!(actions[0].id, "column.stats");
+            let sql = actions[0].sql.as_deref().unwrap();
+            assert!(
+                !sql.contains("min(`tags`)"),
+                "type {}: {}",
+                complex_type,
+                sql
+            );
+            assert!(
+                !sql.contains("max(`tags`)"),
+                "type {}: {}",
+                complex_type,
+                sql
+            );
+            assert!(!sql.contains("topK"), "type {}: {}", complex_type, sql);
+            assert!(
+                sql.contains("min(length(`tags`))"),
+                "type {}: {}",
+                complex_type,
+                sql
+            );
+            assert!(
+                sql.contains("max(length(`tags`))"),
+                "type {}: {}",
+                complex_type,
+                sql
+            );
+        }
+
+        // A plain scalar type keeps the original min/max/topK query and the top_10 action.
+        let scalar_actions = get_context_actions_for_node(
+            "column",
+            "col.analytics.events.tags",
+            Some("LowCardinality(String)"),
+        )
+        .unwrap();
+        assert_eq!(scalar_actions.len(), 2);
+        assert!(
+            scalar_actions[0]
+                .sql
+                .as_deref()
+                .unwrap()
+                .contains("min(`tags`)")
+        );
+    }
+
+    #[test]
+    fn test_context_actions_sql_injection_protection() {
+        let malicious_part = "part.db`test.tbl'test.2026'; DROP TABLE secret; --";
+        let actions = get_context_actions_for_node("partition", malicious_part, None).unwrap();
+        assert_eq!(
+            actions[0].sql.as_deref(),
+            Some(
+                "ALTER TABLE `db``test`.`tbl'test` DROP PARTITION '2026\'\'; DROP TABLE secret; --'"
+            )
+        );
+
+        let malicious_col = "col.db.tbl.user_id`; DROP TABLE users; --";
+        let col_actions = get_context_actions_for_node("column", malicious_col, None).unwrap();
+        assert!(
+            col_actions[1]
+                .sql
+                .as_ref()
+                .unwrap()
+                .contains("`user_id``; DROP TABLE users; --`")
+        );
+    }
+
+    #[test]
+    fn test_context_actions_with_dotted_table_name() {
+        use crate::utils::node_id::encode_id_segment;
+
+        // A table name containing a literal '.' must survive nodeId round-trip
+        // unmangled instead of being split into extra bogus segments (CWE-20).
+        let node_id = format!(
+            "table.{}.{}",
+            encode_id_segment("analytics"),
+            encode_id_segment("weird.table.name")
+        );
+        let actions = get_context_actions_for_node("table", &node_id, None).unwrap();
+        assert_eq!(
+            actions[0].sql.as_deref(),
+            Some("SELECT * FROM `analytics`.`weird.table.name` LIMIT 100")
+        );
+    }
+
+    #[test]
     fn test_invalid_node_id() {
-        assert!(get_context_actions_for_node("table", "table.only").is_err());
-        assert!(get_context_actions_for_node("partition", "part.only.two").is_err());
-        assert!(get_context_actions_for_node("column", "col.only.two").is_err());
+        assert!(get_context_actions_for_node("table", "table.only", None).is_err());
+        assert!(get_context_actions_for_node("partition", "part.only.two", None).is_err());
+        assert!(get_context_actions_for_node("column", "col.only.two", None).is_err());
     }
 }

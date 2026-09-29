@@ -48,7 +48,10 @@ pub async fn handle_handshake(params: Option<Value>) -> Result<Value, DriverErro
             "db.getSchemaTree",
             "db.expandTreeNode",
             "db.getConnectionFormSchema",
-            "sdui.contextActions"
+            "sdui.contextActions",
+            "db.getCapabilities",
+            "db.getServerStats",
+            "db.getObjectMetadata"
         ]
     }))
 }

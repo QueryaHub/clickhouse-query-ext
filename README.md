@@ -33,8 +33,8 @@ cargo build --release
 | Файл | Назначение |
 |------|------------|
 | `target/release/clickhouse-query-ext` | Бинарник драйвера |
-| `dist/clickhouse-query-ext-1.0.1.qext` | Пакет для установки в Querya Desktop |
-| `dist/clickhouse-query-ext-1.0.1.qext.sha256` | Контрольная сумма |
+| `dist/clickhouse-query-ext-1.0.2.qext` | Пакет для установки в Querya Desktop |
+| `dist/clickhouse-query-ext-1.0.2.qext.sha256` | Контрольная сумма |
 
 Установка: **Querya Desktop → Extensions → Install from file** → выбрать `.qext`.
 
