@@ -40,10 +40,27 @@ impl SduiContextAction {
     }
 }
 
+/// Returns `true` if a ClickHouse column type is a complex type (`Array`, `Map`,
+/// `Tuple`) that the `min`/`max`/`topK` aggregate functions cannot operate on
+/// directly, so the Column Profiler must fall back to type-appropriate queries.
+fn is_complex_clickhouse_type(column_type: &str) -> bool {
+    let mut t = column_type.trim();
+    if let Some(inner) = t.strip_prefix("Nullable(") {
+        t = inner.trim_end_matches(')');
+    }
+    t.starts_with("Array(") || t.starts_with("Map(") || t.starts_with("Tuple(")
+}
+
 /// Generates SDUI context menu actions based on `nodeType` and `nodeId`.
+///
+/// `column_type` is the ClickHouse type of the target column (e.g. from
+/// `system.columns`), used only for `nodeType == "column"` to choose a
+/// profiling query that's valid for the column's type. Pass `None` when the
+/// type is unknown; the scalar-oriented query is used as a safe default.
 pub fn get_context_actions_for_node(
     node_type: &str,
     node_id: &str,
+    column_type: Option<&str>,
 ) -> Result<Vec<SduiContextAction>, DriverError> {
     let parts: Vec<String> = split_node_id(node_id);
 
@@ -372,20 +389,35 @@ pub fn get_context_actions_for_node(
             let q_tbl = quote_identifier(table_name);
             let q_col = quote_identifier(col_name);
 
-            Ok(vec![
-                SduiContextAction::new(
-                    "column.stats",
-                    "📈 Column Statistics (Быстрый профайлер)",
-                    Some("bar-chart"),
-                    "query",
-                    Some(format!(
+            // `min`/`max`/`topK` cannot operate on Array/Map/Tuple columns in
+            // ClickHouse (ILLEGAL_TYPE_OF_ARGUMENT), and GROUP BY on a Map column
+            // is rejected outright, so complex-typed columns get a profiling
+            // query built from length()/uniqueness instead, and no "Top 10
+            // Frequent Values" action (see issue #60).
+            let is_complex = column_type.is_some_and(is_complex_clickhouse_type);
+
+            let mut actions = vec![SduiContextAction::new(
+                "column.stats",
+                "📈 Column Statistics (Быстрый профайлер)",
+                Some("bar-chart"),
+                "query",
+                Some(if is_complex {
+                    format!(
+                        "SELECT count() as total_rows, countIf(isNotNull({0})) as not_nulls, uniqExact({0}) as unique_exact, min(length({0})) as min_length, max(length({0})) as max_length FROM {1}.{2}",
+                        q_col, q_db, q_tbl
+                    )
+                } else {
+                    format!(
                         "SELECT count() as total_rows, countIf(isNotNull({0})) as not_nulls, uniqExact({0}) as unique_exact, min({0}) as min_val, max({0}) as max_val, topK(5)({0}) as top_5_values FROM {1}.{2}",
                         q_col, q_db, q_tbl
-                    )),
-                    false,
-                    false,
-                ),
-                SduiContextAction::new(
+                    )
+                }),
+                false,
+                false,
+            )];
+
+            if !is_complex {
+                actions.push(SduiContextAction::new(
                     "column.top_10",
                     "🔝 Top 10 Frequent Values",
                     Some("list"),
@@ -396,8 +428,10 @@ pub fn get_context_actions_for_node(
                     )),
                     false,
                     false,
-                ),
-            ])
+                ));
+            }
+
+            Ok(actions)
         }
         _ => Ok(Vec::new()),
     }
@@ -409,7 +443,8 @@ mod tests {
 
     #[test]
     fn test_table_context_actions() {
-        let actions = get_context_actions_for_node("table", "table.analytics.events").unwrap();
+        let actions =
+            get_context_actions_for_node("table", "table.analytics.events", None).unwrap();
         assert_eq!(actions.len(), 8);
         assert_eq!(actions[0].id, "table.top_100");
         assert_eq!(
@@ -432,7 +467,8 @@ mod tests {
     #[test]
     fn test_partition_context_actions() {
         let actions =
-            get_context_actions_for_node("partition", "part.analytics.events.202607").unwrap();
+            get_context_actions_for_node("partition", "part.analytics.events.202607", None)
+                .unwrap();
         assert_eq!(actions.len(), 6);
         assert_eq!(actions[0].id, "partition.drop");
         assert_eq!(
@@ -483,7 +519,7 @@ mod tests {
 
     #[test]
     fn test_database_and_view_actions() {
-        let db_actions = get_context_actions_for_node("database", "db.analytics").unwrap();
+        let db_actions = get_context_actions_for_node("database", "db.analytics", None).unwrap();
         assert_eq!(db_actions.len(), 4);
         assert_eq!(db_actions[0].id, "db.active_mutations");
         assert_eq!(db_actions[1].id, "db.active_queries");
@@ -491,7 +527,7 @@ mod tests {
         assert_eq!(db_actions[3].id, "db.kill_queries");
 
         let view_actions =
-            get_context_actions_for_node("view", "view.analytics.mv_summary").unwrap();
+            get_context_actions_for_node("view", "view.analytics.mv_summary", None).unwrap();
         assert_eq!(view_actions.len(), 2);
         assert_eq!(view_actions[0].id, "view.top_100");
         assert_eq!(
@@ -502,7 +538,8 @@ mod tests {
 
     #[test]
     fn test_server_and_process_monitoring_actions() {
-        let server_actions = get_context_actions_for_node("server", "server.cluster").unwrap();
+        let server_actions =
+            get_context_actions_for_node("server", "server.cluster", None).unwrap();
         assert_eq!(server_actions.len(), 3);
         assert_eq!(server_actions[0].id, "server.active_mutations");
         assert_eq!(server_actions[1].id, "server.active_queries");
@@ -513,7 +550,7 @@ mod tests {
     #[test]
     fn test_column_context_actions() {
         let actions =
-            get_context_actions_for_node("column", "col.analytics.events.user_id").unwrap();
+            get_context_actions_for_node("column", "col.analytics.events.user_id", None).unwrap();
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].id, "column.stats");
         assert_eq!(
@@ -534,9 +571,79 @@ mod tests {
     }
 
     #[test]
+    fn test_column_context_actions_for_complex_types() {
+        // Regression for issue #60: min()/max()/topK() abort with
+        // ILLEGAL_TYPE_OF_ARGUMENT on Array/Map/Tuple columns, and GROUP BY
+        // on a raw Map column is rejected outright, so complex-typed columns
+        // must get a length()-based profiling query and no top_10 action.
+        for complex_type in [
+            "Array(String)",
+            "Map(String, UInt64)",
+            "Tuple(Int32, String)",
+            "Nullable(Array(String))",
+        ] {
+            let actions = get_context_actions_for_node(
+                "column",
+                "col.analytics.events.tags",
+                Some(complex_type),
+            )
+            .unwrap();
+            assert_eq!(
+                actions.len(),
+                1,
+                "expected only column.stats for type {}",
+                complex_type
+            );
+            assert_eq!(actions[0].id, "column.stats");
+            let sql = actions[0].sql.as_deref().unwrap();
+            assert!(
+                !sql.contains("min(`tags`)"),
+                "type {}: {}",
+                complex_type,
+                sql
+            );
+            assert!(
+                !sql.contains("max(`tags`)"),
+                "type {}: {}",
+                complex_type,
+                sql
+            );
+            assert!(!sql.contains("topK"), "type {}: {}", complex_type, sql);
+            assert!(
+                sql.contains("min(length(`tags`))"),
+                "type {}: {}",
+                complex_type,
+                sql
+            );
+            assert!(
+                sql.contains("max(length(`tags`))"),
+                "type {}: {}",
+                complex_type,
+                sql
+            );
+        }
+
+        // A plain scalar type keeps the original min/max/topK query and the top_10 action.
+        let scalar_actions = get_context_actions_for_node(
+            "column",
+            "col.analytics.events.tags",
+            Some("LowCardinality(String)"),
+        )
+        .unwrap();
+        assert_eq!(scalar_actions.len(), 2);
+        assert!(
+            scalar_actions[0]
+                .sql
+                .as_deref()
+                .unwrap()
+                .contains("min(`tags`)")
+        );
+    }
+
+    #[test]
     fn test_context_actions_sql_injection_protection() {
         let malicious_part = "part.db`test.tbl'test.2026'; DROP TABLE secret; --";
-        let actions = get_context_actions_for_node("partition", malicious_part).unwrap();
+        let actions = get_context_actions_for_node("partition", malicious_part, None).unwrap();
         assert_eq!(
             actions[0].sql.as_deref(),
             Some(
@@ -545,7 +652,7 @@ mod tests {
         );
 
         let malicious_col = "col.db.tbl.user_id`; DROP TABLE users; --";
-        let col_actions = get_context_actions_for_node("column", malicious_col).unwrap();
+        let col_actions = get_context_actions_for_node("column", malicious_col, None).unwrap();
         assert!(
             col_actions[1]
                 .sql
@@ -566,7 +673,7 @@ mod tests {
             encode_id_segment("analytics"),
             encode_id_segment("weird.table.name")
         );
-        let actions = get_context_actions_for_node("table", &node_id).unwrap();
+        let actions = get_context_actions_for_node("table", &node_id, None).unwrap();
         assert_eq!(
             actions[0].sql.as_deref(),
             Some("SELECT * FROM `analytics`.`weird.table.name` LIMIT 100")
@@ -575,8 +682,8 @@ mod tests {
 
     #[test]
     fn test_invalid_node_id() {
-        assert!(get_context_actions_for_node("table", "table.only").is_err());
-        assert!(get_context_actions_for_node("partition", "part.only.two").is_err());
-        assert!(get_context_actions_for_node("column", "col.only.two").is_err());
+        assert!(get_context_actions_for_node("table", "table.only", None).is_err());
+        assert!(get_context_actions_for_node("partition", "part.only.two", None).is_err());
+        assert!(get_context_actions_for_node("column", "col.only.two", None).is_err());
     }
 }
