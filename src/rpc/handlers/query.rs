@@ -341,14 +341,13 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
 ["UInt64", "String", "Nullable(UInt64)"]
 [18446744073709551615, "page_view", 42]
 [100, "click", null]"#;
-            let mut parsed_val = serde_json::to_value(parse_compact_output(
+            let mut result = parse_compact_output(
                 mock_output,
                 start_time.elapsed().as_millis() as u64,
-            )?)?;
-            if let Some(obj) = parsed_val.as_object_mut() {
-                obj.insert("queryId".to_string(), json!(actual_query_id));
-            }
-            return Ok(parsed_val);
+                query_params.limit,
+            )?;
+            result.query_id = Some(actual_query_id);
+            return Ok(serde_json::to_value(result)?);
         } else {
             return Ok(build_non_tabular_result(
                 &upper_sql,
@@ -370,11 +369,9 @@ pub async fn handle_query(params: Option<Value>) -> Result<Value, DriverError> {
     let elapsed = start_time.elapsed().as_millis() as u64;
 
     if is_tabular_query {
-        let mut parsed_val = serde_json::to_value(parse_compact_output(&text, elapsed)?)?;
-        if let Some(obj) = parsed_val.as_object_mut() {
-            obj.insert("queryId".to_string(), json!(actual_query_id));
-        }
-        Ok(parsed_val)
+        let mut result = parse_compact_output(&text, elapsed, query_params.limit)?;
+        result.query_id = Some(actual_query_id);
+        Ok(serde_json::to_value(result)?)
     } else {
         Ok(build_non_tabular_result(
             &upper_sql,
@@ -768,6 +765,32 @@ mod tests {
         assert_eq!(res["rows"][0][1], json!("page_view"));
 
         ConnectionPool::global().remove(111);
+    }
+
+    #[tokio::test]
+    async fn test_handle_query_enforces_limit() {
+        // Regression for issue #47: a `limit` in the request must actually
+        // truncate the parsed rows instead of being silently ignored.
+        let _guard = crate::utils::test_lock::GLOBAL_TEST_LOCK.lock().await;
+        let client = ClickHouseClient::from_params(ConnectParams {
+            connection_id: 113,
+            connection_string: Some("mock://localhost:8123/default".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        ConnectionPool::global().insert(client);
+
+        let query_params = json!({
+            "connectionId": 113,
+            "sql": "SELECT id, event_name, user_id FROM events",
+            "limit": 1
+        });
+
+        let res = handle_query(Some(query_params)).await.unwrap();
+        assert_eq!(res["rows"].as_array().unwrap().len(), 1);
+        assert_eq!(res["statistics"]["rowsRead"], 1);
+
+        ConnectionPool::global().remove(113);
     }
 
     #[tokio::test]
