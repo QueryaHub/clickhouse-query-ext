@@ -657,6 +657,38 @@ mod tests {
     }
 
     #[test]
+    fn test_split_sql_statements_handles_escaped_and_doubled_quotes() {
+        // Regression for issue #59: a backslash-escaped quote or a doubled quote
+        // inside a string literal must not be treated as the string's closing quote.
+        assert_eq!(
+            split_sql_statements("SELECT 'Customer\\'s notes'; SELECT 2"),
+            vec!["SELECT 'Customer\\'s notes'", "SELECT 2"]
+        );
+        assert_eq!(
+            split_sql_statements("SELECT 'Don''t drop; table'; SELECT 2"),
+            vec!["SELECT 'Don''t drop; table'", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn test_strip_sql_comments_handles_escaped_and_doubled_quotes() {
+        // Regression for issue #59: an escaped quote (`\'`) must not prematurely
+        // close a string literal and expose a following `--` as a real comment.
+        let escaped =
+            strip_sql_comments_and_trim("SELECT 'Customer\\'s notes -- internal' FROM feedback");
+        assert!(escaped.starts_with("SELECT"));
+        assert!(escaped.ends_with("FROM FEEDBACK"));
+
+        // A doubled quote (`''`, the SQL-standard escape) must not close the
+        // string either, so the literal's content never leaks into the
+        // normalized output as bare keywords.
+        let doubled = strip_sql_comments_and_trim("SELECT 'Don''t drop table' FROM logs");
+        assert!(doubled.starts_with("SELECT"));
+        assert!(doubled.ends_with("FROM LOGS"));
+        assert!(!doubled.contains("DROP TABLE"));
+    }
+
+    #[test]
     fn test_safe_mode_multi_statement_bypass_prevention() {
         // Multi-statement bypass attempts from Issue #54
         assert!(
@@ -678,6 +710,16 @@ mod tests {
         // Benign multi-statement queries
         assert!(enforce_safe_mode_precheck("SELECT 1; SELECT 2; SHOW TABLES;").is_ok());
         assert!(enforce_safe_mode_precheck("SELECT ';'; SELECT 'DROP TABLE in string';").is_ok());
+
+        // Regression for issue #59: an escaped or doubled quote inside a string
+        // literal must not desynchronize comment/string tracking for the rest of
+        // the query, which would otherwise falsely block a benign query or hide a
+        // dangerous statement behind a fake comment.
+        assert!(
+            enforce_safe_mode_precheck("SELECT 'Customer\\'s notes -- internal' FROM feedback")
+                .is_ok()
+        );
+        assert!(enforce_safe_mode_precheck("SELECT 'Don''t drop table' FROM logs").is_ok());
     }
 
     #[tokio::test]
