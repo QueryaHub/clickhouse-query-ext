@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+# Windows runners ship `python`, not `python3`; a missing interpreter used to
+# fall back silently to version 1.0.0 and name the archive after it.
+if command -v python3 >/dev/null 2>&1; then
+  PY=python3
+elif command -v python >/dev/null 2>&1; then
+  PY=python
+else
+  echo "❌ Error: python3 (or python) is required to package the extension."
+  exit 1
+fi
+
 # Script to package clickhouse-query-ext binary along with manifest.json and assets/
 # into a distribution .qext archive (.zip) and generate SHA-256 checksums for Querya Desktop Block B validation.
 
@@ -47,7 +58,11 @@ else
 fi
 
 # Extract version from manifest.json using Python (works reliably across platforms)
-VERSION=$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])" 2>/dev/null || echo "1.0.0")
+VERSION=$("$PY" -c "import json; print(json.load(open('manifest.json'))['version'])")
+if [ -z "$VERSION" ]; then
+  echo "❌ Error: could not read the version from manifest.json."
+  exit 1
+fi
 
 echo "=========================================================================="
 echo "📦 Packaging Querya Extension (.qext) for target: ${TARGET}"
@@ -66,7 +81,7 @@ cp -r assets/* "${STAGING_DIR}/assets/"
 
 # For Windows targets, adjust manifest.json main entry point to include .exe extension
 if [[ "$TARGET" == *"windows"* ]] || [[ "$DEST_BIN_NAME" == *".exe" ]]; then
-  python3 -c "
+  "$PY" -c "
 import json, sys
 manifest_path = sys.argv[1]
 dest_bin = sys.argv[2]
@@ -97,7 +112,7 @@ ARCHIVE_NAME="clickhouse-query-ext-${VERSION}-${TARGET}.qext"
 ARCHIVE_PATH="dist/${ARCHIVE_NAME}"
 rm -f "${ARCHIVE_PATH}"
 
-python3 -c "
+"$PY" -c "
 import zipfile, os, sys
 archive_path = sys.argv[1]
 staging_dir = sys.argv[2]
@@ -109,9 +124,11 @@ with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(full_path, rel_path)
 " "${ARCHIVE_PATH}" "${STAGING_DIR}"
 
-# Also create universal/shorthand name if packaging host target
+# Also create the shorthand name for the Linux build only: every runner of the
+# release matrix would otherwise upload a file of that name, and the last one
+# downloaded would win.
 HOST_TARGET=$(rustc -vV | sed -n 's|host: ||p' 2>/dev/null || echo "")
-if [ "$TARGET" = "$HOST_TARGET" ]; then
+if [ "$TARGET" = "$HOST_TARGET" ] && [[ "$TARGET" == *linux* ]]; then
   cp "${ARCHIVE_PATH}" "dist/clickhouse-query-ext-${VERSION}.qext"
 fi
 
@@ -119,7 +136,7 @@ fi
 generate_sha256() {
   local file_path="$1"
   local sha_output="${file_path}.sha256"
-  python3 -c "
+  "$PY" -c "
 import hashlib, sys, os
 with open(sys.argv[1], 'rb') as f:
     print(hashlib.sha256(f.read()).hexdigest() + ' *' + os.path.basename(sys.argv[1]))
@@ -128,7 +145,7 @@ with open(sys.argv[1], 'rb') as f:
 }
 
 generate_sha256 "${ARCHIVE_PATH}"
-if [ -f "dist/clickhouse-query-ext-${VERSION}.qext" ] && [ "$TARGET" = "$HOST_TARGET" ]; then
+if [ -f "dist/clickhouse-query-ext-${VERSION}.qext" ] && [ "$TARGET" = "$HOST_TARGET" ] && [[ "$TARGET" == *linux* ]]; then
   generate_sha256 "dist/clickhouse-query-ext-${VERSION}.qext"
 fi
 
