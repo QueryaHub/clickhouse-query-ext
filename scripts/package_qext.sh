@@ -58,7 +58,9 @@ else
 fi
 
 # Extract version from manifest.json using Python (works reliably across platforms)
-VERSION=$("$PY" -c "import json; print(json.load(open('manifest.json'))['version'])")
+# utf-8 explicitly: the manifest has Cyrillic text, and Windows Python reads
+# files as cp1252 by default (that was the real cause of the silent 1.0.0).
+VERSION=$("$PY" -c "import json; print(json.load(open('manifest.json', encoding='utf-8'))['version'])")
 if [ -z "$VERSION" ]; then
   echo "❌ Error: could not read the version from manifest.json."
   exit 1
